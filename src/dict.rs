@@ -19,7 +19,57 @@ use std::path::{Path, PathBuf};
 const DEFAULT_NAME: &str = ".redink.dic";
 const HEADER: &[&str] = &[
     "# redink working dictionary",
-    "# bare word: case-insensitive  |  =Word: case-sensitive (exact case)",
+    "# bare word: case-insensitive  |  =Word: case-sensitive  |  multi-word line: phrase",
+];
+
+/// Common Latin phrases used in English prose. A token is accepted when it
+/// forms part of one of these (bigram-matched against its neighbours), so
+/// e.g. "se" passes only in "per se" and is still flagged elsewhere. Extend
+/// per-project by adding multi-word lines to `.redink.dic`.
+pub const LATIN_PHRASES: &[&str] = &[
+    "a fortiori",
+    "a posteriori",
+    "a priori",
+    "ad hoc",
+    "ad hominem",
+    "ad lib",
+    "ad libitum",
+    "bona fide",
+    "caveat emptor",
+    "corpus delicti",
+    "de facto",
+    "de jure",
+    "et cetera",
+    "ex ante",
+    "ex cathedra",
+    "ex officio",
+    "ex parte",
+    "ex post",
+    "ex post facto",
+    "in extremis",
+    "in re",
+    "in situ",
+    "in vitro",
+    "in vivo",
+    "inter alia",
+    "ipso facto",
+    "magnum opus",
+    "modus operandi",
+    "mutatis mutandis",
+    "non sequitur",
+    "nota bene",
+    "per se",
+    "prima facie",
+    "pro rata",
+    "pro se",
+    "quid pro quo",
+    "res judicata",
+    "status quo",
+    "sub judice",
+    "sub rosa",
+    "sui generis",
+    "tabula rasa",
+    "vice versa",
 ];
 
 #[derive(Debug, Default, Clone)]
@@ -28,6 +78,34 @@ pub struct WorkingDict {
     pub ci: HashSet<String>,
     /// Case-sensitive entries, stored in exact casing.
     pub cs: HashSet<String>,
+    /// Multi-word phrases (lowercased), matched as bigrams against neighbours.
+    pub phrases: HashSet<String>,
+}
+
+/// Decompose a phrase into its adjacent bigrams, lowercased and
+/// whitespace-normalized. "quid pro quo" -> {"quid pro", "pro quo"}.
+pub fn phrase_bigrams(phrase: &str) -> Vec<String> {
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    words
+        .windows(2)
+        .map(|w| format!("{} {}", w[0], w[1]))
+        .collect()
+}
+
+/// Build the full bigram set used for phrase matching: the bundled Latin list
+/// plus any project phrases from the working dictionary.
+pub fn build_phrase_bigrams(user_phrases: &HashSet<String>) -> HashSet<String> {
+    let mut set = HashSet::new();
+    let all = LATIN_PHRASES
+        .iter()
+        .copied()
+        .chain(user_phrases.iter().map(String::as_str));
+    for p in all {
+        for bg in phrase_bigrams(p) {
+            set.insert(bg);
+        }
+    }
+    set
 }
 
 /// Strip a trailing English possessive (`'s` / `'s` / `'S` / `'S`, using an
@@ -75,12 +153,12 @@ impl WorkingDict {
 
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
-        self.ci.is_empty() && self.cs.is_empty()
+        self.ci.is_empty() && self.cs.is_empty() && self.phrases.is_empty()
     }
 
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
-        self.ci.len() + self.cs.len()
+        self.ci.len() + self.cs.len() + self.phrases.len()
     }
 }
 
@@ -121,6 +199,14 @@ pub fn load(path: &Path) -> anyhow::Result<WorkingDict> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        // A line containing whitespace is a phrase (matched as bigrams).
+        if line.chars().any(char::is_whitespace) {
+            let norm: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            if norm.split(' ').count() >= 2 {
+                dict.phrases.insert(norm.to_lowercase());
+            }
+            continue;
+        }
         if let Some(rest) = line.strip_prefix('=') {
             if !rest.is_empty() {
                 dict.add_cs(rest);
@@ -142,6 +228,8 @@ pub fn save(path: &Path, dict: &WorkingDict) -> anyhow::Result<()> {
     ci.sort();
     let mut cs: Vec<&String> = dict.cs.iter().collect();
     cs.sort();
+    let mut ph: Vec<&String> = dict.phrases.iter().collect();
+    ph.sort();
 
     let mut out = String::new();
     for h in HEADER {
@@ -156,6 +244,13 @@ pub fn save(path: &Path, dict: &WorkingDict) -> anyhow::Result<()> {
         out.push('=');
         out.push_str(w);
         out.push('\n');
+    }
+    if !ph.is_empty() {
+        out.push_str("# phrases:\n");
+        for w in &ph {
+            out.push_str(w);
+            out.push('\n');
+        }
     }
     std::fs::write(path, out)?;
     Ok(())
@@ -228,5 +323,25 @@ mod tests {
         d.add_ci("atrax");
         assert!(d.remove("Atrax's")); // remove via the possessive form
         assert!(!d.ci.contains("atrax"));
+    }
+
+    #[test]
+    fn phrase_load_save_roundtrip() {
+        let p = scratch("phrases.dic");
+        let mut d = WorkingDict::default();
+        d.phrases.insert("per se".to_string());
+        d.phrases.insert("quid pro quo".to_string());
+        save(&p, &d).unwrap();
+        let loaded = load(&p).unwrap();
+        assert!(loaded.phrases.contains("per se"));
+        assert!(loaded.phrases.contains("quid pro quo"));
+    }
+
+    #[test]
+    fn phrase_bigrams_decompose() {
+        let bg = phrase_bigrams("quid pro quo");
+        assert_eq!(bg, vec!["quid pro", "pro quo"]);
+        assert_eq!(phrase_bigrams("per se"), vec!["per se"]);
+        assert!(phrase_bigrams("solo").is_empty());
     }
 }

@@ -1,13 +1,13 @@
 //! Driving a spellcheck pass over files into a list of [`Misspelling`] records.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use crate::engine::Engine;
 use crate::format::{self, Format};
-use crate::token::tokenize;
+use crate::token::{tokenize, Token};
 
 /// A single misspelled-word occurrence in a file.
 #[derive(Debug, Clone)]
@@ -39,9 +39,16 @@ pub fn check_file(
     let line_starts = LineStarts::new(&src);
     let skip = format::skip_ranges(&src, format.resolve(path));
     let tokens = tokenize(&src, &skip);
+    let phrases = engine.phrase_bigrams();
 
     let mut out = Vec::new();
-    for tok in tokens {
+    for (i, tok) in tokens.iter().enumerate() {
+        // Phrase matching: a token that forms a known bigram with its neighbour
+        // (e.g. "se" in "per se") is accepted, so fragment words are only let
+        // through in their phrase context and still flagged elsewhere.
+        if phrase_covered(i, &tokens, phrases) {
+            continue;
+        }
         if tok.word.contains('-') {
             // Stage 1: the whole compound. If any layer recognizes it, accept.
             if engine.check(&tok.word) {
@@ -84,6 +91,24 @@ pub fn check_file(
         }
     }
     Ok(out)
+}
+
+/// True if `tokens[i]` forms a known phrase bigram with either neighbour.
+fn phrase_covered(i: usize, tokens: &[Token], phrases: &HashSet<String>) -> bool {
+    let w = tokens[i].word.to_lowercase();
+    if i > 0 {
+        let p = tokens[i - 1].word.to_lowercase();
+        if phrases.contains(&format!("{p} {w}")) {
+            return true;
+        }
+    }
+    if i + 1 < tokens.len() {
+        let n = tokens[i + 1].word.to_lowercase();
+        if phrases.contains(&format!("{w} {n}")) {
+            return true;
+        }
+    }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -191,5 +216,50 @@ mod tests {
                 ("Stone", 20..25),
             ]
         );
+    }
+
+    fn check_str(src: &str) -> Vec<String> {
+        // Write to a temp file and run a real check with the bundled engine.
+        let dir = std::env::temp_dir().join(format!(
+            "redink-check-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.md");
+        std::fs::write(&path, src).unwrap();
+
+        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let dict = crate::engine::load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let engine = crate::engine::Engine::new(
+            dict,
+            crate::dict::WorkingDict::default(),
+            std::path::PathBuf::from("/dev/null"),
+        );
+        let mut cache = HashMap::new();
+        let miss = check_file(&path, Format::Auto, &engine, &mut cache, 9).unwrap();
+        miss.into_iter().map(|m| m.word).collect()
+    }
+
+    #[test]
+    fn phrase_matching() {
+        // "se" is accepted inside "per se" but flagged on its own.
+        let m = check_str("It was, per se, fine. But se alone is a typo.");
+        assert!(
+            !m.contains(&"se".to_string()) || m.iter().filter(|w| *w == "se").count() == 1,
+            "expected exactly one 'se' (the standalone): {m:?}"
+        );
+        assert!(m.contains(&"se".to_string()));
+    }
+
+    #[test]
+    fn latin_phrases_accepted() {
+        let m = check_str("A de facto rule; in vitro; ad hoc; ipso facto; bona fide.");
+        // none of the Latin fragment words should be flagged
+        for bad in ["facto", "vitro", "ipso", "bona", "fide"] {
+            assert!(!m.contains(&bad.to_string()), "{bad} flagged: {m:?}");
+        }
     }
 }

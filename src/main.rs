@@ -164,24 +164,38 @@ fn run_dict(opts: &cli::GlobalOpts, action: DictAction) -> Result<()> {
             ci.sort();
             let mut cs: Vec<&String> = d.cs.iter().collect();
             cs.sort();
+            let mut ph: Vec<&String> = d.phrases.iter().collect();
+            ph.sort();
             for w in ci {
                 let _ = writeln!(out, "{w}");
             }
             for w in cs {
                 let _ = writeln!(out, "={w}");
             }
+            if !ph.is_empty() {
+                let _ = writeln!(out, "# phrases:");
+                for w in ph {
+                    let _ = writeln!(out, "{w}");
+                }
+            }
         }
         DictAction::Add { words, sensitive } => {
             let mut d = dict::load(&working_path)?;
             for w in &words {
-                if sensitive {
+                if w.chars().any(char::is_whitespace) {
+                    // A multi-word argument is a phrase, matched as bigrams.
+                    let norm: String = w.split_whitespace().collect::<Vec<_>>().join(" ");
+                    if norm.split(' ').count() >= 2 {
+                        d.phrases.insert(norm.to_lowercase());
+                    }
+                } else if sensitive {
                     d.add_cs(w);
                 } else {
                     d.add_ci(w);
                 }
             }
             dict::save(&working_path, &d)?;
-            eprintln!("added {} word(s) to {}", words.len(), working_path.display());
+            eprintln!("added {} entr{} to {}", words.len(), if words.len() == 1 { "y" } else { "ies" }, working_path.display());
         }
         DictAction::Remove { words } => {
             let mut d = dict::load(&working_path)?;

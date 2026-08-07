@@ -14,22 +14,31 @@ use spellbook::Dictionary;
 
 use crate::dict::{canonical, strip_possessive, WorkingDict};
 
+/// Minimum character length for a suggestion to be shown. Shorter ones are
+/// almost always noise (e.g. "e", "s", "es").
+const MIN_SUGGEST_LEN: usize = 3;
+
 pub struct Engine {
     dict: Dictionary,
     working_path: PathBuf,
     working_ci: HashSet<String>,
     working_cs: HashSet<String>,
+    working_phrases: HashSet<String>,
     session_ignore: HashSet<String>,
+    phrase_bigrams: HashSet<String>,
 }
 
 impl Engine {
     pub fn new(dict: Dictionary, working: WorkingDict, working_path: PathBuf) -> Self {
+        let phrase_bigrams = crate::dict::build_phrase_bigrams(&working.phrases);
         Self {
             dict,
             working_path,
             working_ci: working.ci,
             working_cs: working.cs,
+            working_phrases: working.phrases,
             session_ignore: HashSet::new(),
+            phrase_bigrams,
         }
     }
 
@@ -76,10 +85,12 @@ impl Engine {
         false
     }
 
-    /// Suggested corrections for `word` from the system dictionary.
+    /// Suggested corrections for `word` from the system dictionary. Very short
+    /// suggestions (< 3 characters) are dropped — they're mostly noise.
     pub fn suggest(&self, word: &str) -> Vec<String> {
         let mut out = Vec::new();
         self.dict.checker().into_suggester().suggest(word, &mut out);
+        out.retain(|s| s.chars().count() >= MIN_SUGGEST_LEN);
         out
     }
 
@@ -111,11 +122,18 @@ impl Engine {
         a || b
     }
 
+    /// The merged phrase-bigram set (bundled Latin list + project phrases),
+    /// used by the checker to accept tokens that are part of a known phrase.
+    pub fn phrase_bigrams(&self) -> &HashSet<String> {
+        &self.phrase_bigrams
+    }
+
     /// Write the working dictionary back to disk.
     pub fn save_working(&self) -> anyhow::Result<()> {
         let dict = WorkingDict {
             ci: self.working_ci.clone(),
             cs: self.working_cs.clone(),
+            phrases: self.working_phrases.clone(),
         };
         crate::dict::save(&self.working_path, &dict)
     }
@@ -186,5 +204,16 @@ mod tests {
         assert!(e.check("else"));
         assert!(e.check("else's"), "local patch else->else/M missing?");
         assert!(e.check("anyone else's".split(' ').nth(1).unwrap()));
+    }
+
+    #[test]
+    fn suggestions_drop_very_short() {
+        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
+        // "se" would otherwise yield 1-2 char noise like "e", "s", "es".
+        let sugs = e.suggest("se");
+        assert!(sugs.iter().all(|s| s.chars().count() >= 3), "short leak: {sugs:?}");
+        assert!(sugs.contains(&"see".to_string()));
     }
 }
