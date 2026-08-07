@@ -2,6 +2,16 @@
 name = "redink"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["J/A <archer884@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "A spellchecker for prose — a TUI for humans, a JSON CLI for agents"
+repository = "https://github.com/archer884/redink"
+homepage = "https://github.com/archer884/redink"
+documentation = "https://docs.rs/redink"
+readme = "README.md"
+keywords = ["spellcheck", "spelling", "markdown", "tui", "dictionary"]
+categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
 spellbook = { version = "0.4", default-features = false, features = ["default-hasher"] }
