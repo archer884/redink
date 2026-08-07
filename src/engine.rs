@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use spellbook::Dictionary;
 
-use crate::dict::WorkingDict;
+use crate::dict::{canonical, strip_possessive, WorkingDict};
 
 pub struct Engine {
     dict: Dictionary,
@@ -84,25 +84,30 @@ impl Engine {
     }
 
     /// Ignore `word` for the rest of this session only (case-insensitive).
+    /// The stem is stored so that "Atrax's" also suppresses "Atrax".
     pub fn ignore_session(&mut self, word: &str) {
-        self.session_ignore.insert(word.to_lowercase());
+        self.session_ignore.insert(canonical(word).to_lowercase());
     }
 
-    /// Add a case-insensitive entry (accepted in any casing). Persists on save.
+    /// Add a case-insensitive entry (accepted in any casing). The possessive
+    /// stem is stored, so adding "Atrax's" registers "Atrax". Persists on save.
     pub fn add_ci(&mut self, word: &str) {
-        self.working_ci.insert(word.to_lowercase());
+        self.working_ci.insert(canonical(word).to_lowercase());
     }
 
-    /// Add a case-sensitive entry (exact casing only). Persists on save.
+    /// Add a case-sensitive entry (exact casing only). The possessive stem is
+    /// stored. Persists on save.
     pub fn add_cs(&mut self, word: &str) {
-        self.working_cs.insert(word.to_string());
+        self.working_cs.insert(canonical(word));
     }
 
-    /// Remove an entry (matches either layer). Persists on save.
+    /// Remove an entry (matches either layer; possessive-insensitive).
+    /// Persists on save.
     #[allow(dead_code)]
     pub fn remove(&mut self, word: &str) -> bool {
-        let a = self.working_ci.remove(&word.to_lowercase());
-        let b = self.working_cs.remove(word);
+        let c = canonical(word);
+        let a = self.working_ci.remove(&c.to_lowercase());
+        let b = self.working_cs.remove(&c);
         a || b
     }
 
@@ -122,43 +127,11 @@ pub fn load_dictionary(aff: &str, dic: &str) -> anyhow::Result<Dictionary> {
     Dictionary::new(aff, dic).map_err(|e| anyhow::anyhow!("failed to parse dictionary: {e:?}"))
 }
 
-/// Strip a trailing English possessive (`'s` / `'s` / `'S` / `'S`, using an
-/// ASCII apostrophe or the Unicode right quote U+2019). Returns the stem, or
-/// `None` if `word` has no possessive ending (plurals and other contractions
-/// like "dogs" / "can't" are left alone).
-fn strip_possessive(word: &str) -> Option<&str> {
-    let mut chars = word.chars();
-    let last = chars.next_back()?;
-    if last != 's' && last != 'S' {
-        return None;
-    }
-    let penult = chars.next_back()?;
-    if penult != '\'' && penult != '\u{2019}' {
-        return None;
-    }
-    let new_len = word.len() - penult.len_utf8() - last.len_utf8();
-    if new_len == 0 {
-        return None;
-    }
-    Some(&word[..new_len])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dict::WorkingDict;
     use std::path::PathBuf;
-
-    #[test]
-    fn strip_possessive_cases() {
-        assert_eq!(strip_possessive("Thorne's"), Some("Thorne"));
-        assert_eq!(strip_possessive("Thorne\u{2019}s"), Some("Thorne"));
-        assert_eq!(strip_possessive("THE'S"), Some("THE"));
-        assert_eq!(strip_possessive("dogs"), None);
-        assert_eq!(strip_possessive("can't"), None);
-        assert_eq!(strip_possessive("'s"), None);
-        assert_eq!(strip_possessive("a"), None);
-    }
 
     fn engine_with_ci(word: &str) -> Engine {
         let sys = crate::sysdict::resolve("en_US", None).unwrap();
@@ -176,5 +149,30 @@ mod tests {
         assert!(e.check("Thorne's")); // ASCII possessive
         assert!(e.check("Thorne\u{2019}s")); // smart-quote possessive
         assert!(!e.check("Thornex"));
+    }
+
+    #[test]
+    fn add_via_possessive_form_registers_stem() {
+        // Focused on "Atrax's", pressing add should register the stem "Atrax",
+        // which then accepts both "Atrax" and "Atrax's".
+        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let wd = WorkingDict::default();
+        let mut e = Engine::new(dict, wd, PathBuf::from("/dev/null"));
+        e.add_ci("Atrax's");
+        assert!(e.check("Atrax"));
+        assert!(e.check("Atrax's"));
+        assert!(e.check("atrax"));
+    }
+
+    #[test]
+    fn ignore_via_possessive_suppresses_stem() {
+        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let wd = WorkingDict::default();
+        let mut e = Engine::new(dict, wd, PathBuf::from("/dev/null"));
+        e.ignore_session("Atrax's");
+        assert!(e.check("Atrax"));
+        assert!(e.check("Atrax's"));
     }
 }

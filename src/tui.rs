@@ -320,20 +320,22 @@ impl App {
         let Some(word) = self.cur_word().map(str::to_string) else {
             return;
         };
+        let stem = crate::dict::canonical(&word);
         self.engine.ignore_session(&word);
         self.retain_unresolved();
-        self.message = Some(format!("ignored \u{201c}{word}\u{201d} for this session"));
+        self.message = Some(format!("ignored \u{201c}{stem}\u{201d} for this session"));
     }
 
     fn add_ci(&mut self) {
         let Some(word) = self.cur_word().map(str::to_string) else {
             return;
         };
+        let stem = crate::dict::canonical(&word);
         self.engine.add_ci(&word);
         self.persist_working("add");
         self.retain_unresolved();
         self.message = Some(format!(
-            "added \u{201c}{word}\u{201d} (any case) to {}",
+            "added \u{201c}{stem}\u{201d} (any case) to {}",
             self.engine.working_path().display()
         ));
     }
@@ -342,11 +344,12 @@ impl App {
         let Some(word) = self.cur_word().map(str::to_string) else {
             return;
         };
+        let stem = crate::dict::canonical(&word);
         self.engine.add_cs(&word);
         self.persist_working("add");
         self.retain_unresolved();
         self.message = Some(format!(
-            "added \u{201c}{word}\u{201d} (exact case) to {}",
+            "added \u{201c}{stem}\u{201d} (exact case) to {}",
             self.engine.working_path().display()
         ));
     }
@@ -366,11 +369,12 @@ impl App {
         let Some(tok) = self.current_token() else {
             return;
         };
+        let stem = crate::dict::canonical(&tok);
         self.engine.add_ci(&tok);
         self.persist_working("add");
         self.retain_unresolved();
         self.message = Some(format!(
-            "added \u{201c}{tok}\u{201d} (any case) to {}",
+            "added \u{201c}{stem}\u{201d} (any case) to {}",
             self.engine.working_path().display()
         ));
     }
@@ -380,11 +384,12 @@ impl App {
         let Some(tok) = self.current_token() else {
             return;
         };
+        let stem = crate::dict::canonical(&tok);
         self.engine.add_cs(&tok);
         self.persist_working("add");
         self.retain_unresolved();
         self.message = Some(format!(
-            "added \u{201c}{tok}\u{201d} (exact case) to {}",
+            "added \u{201c}{stem}\u{201d} (exact case) to {}",
             self.engine.working_path().display()
         ));
     }

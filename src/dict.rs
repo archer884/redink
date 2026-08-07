@@ -30,17 +30,47 @@ pub struct WorkingDict {
     pub cs: HashSet<String>,
 }
 
+/// Strip a trailing English possessive (`'s` / `'s` / `'S` / `'S`, using an
+/// ASCII apostrophe or the Unicode right quote U+2019). Returns the stem, or
+/// `None` if `word` has no possessive ending (so plurals like "dogs" and
+/// contractions like "can't" are left alone).
+pub fn strip_possessive(word: &str) -> Option<&str> {
+    let mut chars = word.chars();
+    let last = chars.next_back()?;
+    if last != 's' && last != 'S' {
+        return None;
+    }
+    let penult = chars.next_back()?;
+    if penult != '\'' && penult != '\u{2019}' {
+        return None;
+    }
+    let new_len = word.len() - penult.len_utf8() - last.len_utf8();
+    if new_len == 0 {
+        return None;
+    }
+    Some(&word[..new_len])
+}
+
+/// Canonical form stored in the working dictionary: the possessive stem. So
+/// adding "Atrax's" registers "Atrax", and (via the engine's check-time
+/// stripping) "Atrax's" is accepted too. Words without a possessive ending are
+/// returned unchanged.
+pub fn canonical(word: &str) -> String {
+    strip_possessive(word).unwrap_or(word).to_string()
+}
+
 impl WorkingDict {
     pub fn add_ci(&mut self, word: &str) -> bool {
-        self.ci.insert(word.to_lowercase())
+        self.ci.insert(canonical(word).to_lowercase())
     }
 
     pub fn add_cs(&mut self, word: &str) -> bool {
-        self.cs.insert(word.to_string())
+        self.cs.insert(canonical(word))
     }
 
     pub fn remove(&mut self, word: &str) -> bool {
-        self.ci.remove(&word.to_lowercase()) || self.cs.remove(word)
+        let c = canonical(word);
+        self.ci.remove(&c.to_lowercase()) || self.cs.remove(&c)
     }
 
     #[allow(dead_code)]
@@ -163,5 +193,40 @@ mod tests {
     fn missing_file_is_empty() {
         let p = scratch("nope.dic");
         assert!(load(&p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn strip_possessive_cases() {
+        assert_eq!(strip_possessive("Thorne's"), Some("Thorne"));
+        assert_eq!(strip_possessive("Thorne\u{2019}s"), Some("Thorne"));
+        assert_eq!(strip_possessive("THE'S"), Some("THE"));
+        assert_eq!(strip_possessive("dogs"), None);
+        assert_eq!(strip_possessive("can't"), None);
+        assert_eq!(strip_possessive("'s"), None);
+        assert_eq!(strip_possessive("a"), None);
+        // plural possessive (s') is NOT stripped
+        assert_eq!(strip_possessive("dogs'"), None);
+    }
+
+    #[test]
+    fn add_canonicalizes_possessive() {
+        let mut d = WorkingDict::default();
+        // adding the possessive form stores the stem
+        d.add_ci("Atrax's");
+        assert!(d.ci.contains("atrax"));
+        assert!(!d.ci.contains("atrax's"));
+        d.add_cs("Tzeya-Gan\u{2019}s");
+        assert!(d.cs.contains("Tzeya-Gan"));
+        // a plain word is unchanged
+        d.add_ci("hobbit");
+        assert!(d.ci.contains("hobbit"));
+    }
+
+    #[test]
+    fn remove_canonicalizes_possessive() {
+        let mut d = WorkingDict::default();
+        d.add_ci("atrax");
+        assert!(d.remove("Atrax's")); // remove via the possessive form
+        assert!(!d.ci.contains("atrax"));
     }
 }
