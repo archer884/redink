@@ -32,9 +32,9 @@ fn main() -> ExitCode {
 }
 
 fn run(args: cli::Cli) -> Result<ExitCode> {
-    let opts = args.opts;
+    let cli::Cli { opts, command, files } = args;
 
-    match args.command {
+    match command {
         Some(Command::Fix { file, at, word, to }) => {
             apply_fix(&file, at, &word, &to)?;
             Ok(ExitCode::SUCCESS)
@@ -67,8 +67,9 @@ fn run(args: cli::Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         None => {
-            // No subcommand: TUI if interactive, otherwise check.
-            let files = discover_files();
+            // No subcommand: files given on the command line (or, if none,
+            // everything checkable in the cwd). TUI if interactive, else check.
+            let files = if files.is_empty() { discover_files() } else { files };
             if std::io::stdout().is_terminal() {
                 let engine = build_engine(&opts)?;
                 let miss = check_all(&files, opts.format, &engine)?;

@@ -16,6 +16,12 @@ pub struct Cli {
     #[command(flatten)]
     pub opts: GlobalOpts,
 
+    /// Files to check with no subcommand given (launches the TUI when
+    /// interactive, otherwise a non-interactive check). With none given, walks
+    /// the current directory for text/markdown.
+    #[arg(value_name = "FILES")]
+    pub files: Vec<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
