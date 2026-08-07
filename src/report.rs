@@ -39,6 +39,7 @@ pub fn write_json<W: Write>(out: &mut W, miss: &[Misspelling]) -> anyhow::Result
                 "byte_offset": m.byte_offset,
                 "word": m.word,
                 "suggestions": m.suggestions,
+                "compound": m.compound.as_ref().map(|(w, _)| w),
             })
         })
         .collect();

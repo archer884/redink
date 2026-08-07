@@ -46,7 +46,24 @@ impl Engine {
     }
 
     /// True if `word` is acceptable according to any dictionary layer.
+    ///
+    /// The session and working-dictionary layers also honor possessive-stripping
+    /// so that adding a coinage (e.g. "Thorne") also accepts its possessive
+    /// ("Thorne's"), since the working dictionary is a plain set outside
+    /// spellbook's `'s` affix machinery.
     pub fn check(&self, word: &str) -> bool {
+        if self.user_layer_has(word) {
+            return true;
+        }
+        if strip_possessive(word).is_some_and(|s| self.user_layer_has(s)) {
+            return true;
+        }
+        self.dict.check(word)
+    }
+
+    /// Session-ignore + working-dictionary (ci and cs) layers, case-sensitively
+    /// correct. Does not consult the system dictionary.
+    fn user_layer_has(&self, word: &str) -> bool {
         if self.session_ignore.contains(&word.to_lowercase()) {
             return true;
         }
@@ -56,7 +73,7 @@ impl Engine {
         if self.working_ci.contains(&word.to_lowercase()) {
             return true;
         }
-        self.dict.check(word)
+        false
     }
 
     /// Suggested corrections for `word` from the system dictionary.
@@ -103,4 +120,61 @@ impl Engine {
 /// non-`std::error::Error` parse type into an `anyhow::Error`.
 pub fn load_dictionary(aff: &str, dic: &str) -> anyhow::Result<Dictionary> {
     Dictionary::new(aff, dic).map_err(|e| anyhow::anyhow!("failed to parse dictionary: {e:?}"))
+}
+
+/// Strip a trailing English possessive (`'s` / `'s` / `'S` / `'S`, using an
+/// ASCII apostrophe or the Unicode right quote U+2019). Returns the stem, or
+/// `None` if `word` has no possessive ending (plurals and other contractions
+/// like "dogs" / "can't" are left alone).
+fn strip_possessive(word: &str) -> Option<&str> {
+    let mut chars = word.chars();
+    let last = chars.next_back()?;
+    if last != 's' && last != 'S' {
+        return None;
+    }
+    let penult = chars.next_back()?;
+    if penult != '\'' && penult != '\u{2019}' {
+        return None;
+    }
+    let new_len = word.len() - penult.len_utf8() - last.len_utf8();
+    if new_len == 0 {
+        return None;
+    }
+    Some(&word[..new_len])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dict::WorkingDict;
+    use std::path::PathBuf;
+
+    #[test]
+    fn strip_possessive_cases() {
+        assert_eq!(strip_possessive("Thorne's"), Some("Thorne"));
+        assert_eq!(strip_possessive("Thorne\u{2019}s"), Some("Thorne"));
+        assert_eq!(strip_possessive("THE'S"), Some("THE"));
+        assert_eq!(strip_possessive("dogs"), None);
+        assert_eq!(strip_possessive("can't"), None);
+        assert_eq!(strip_possessive("'s"), None);
+        assert_eq!(strip_possessive("a"), None);
+    }
+
+    fn engine_with_ci(word: &str) -> Engine {
+        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let mut wd = WorkingDict::default();
+        wd.add_ci(word);
+        Engine::new(dict, wd, PathBuf::from("/dev/null"))
+    }
+
+    #[test]
+    fn possessive_accepted_when_base_added() {
+        let e = engine_with_ci("thorne");
+        assert!(e.check("Thorne"));
+        assert!(e.check("thorne"));
+        assert!(e.check("Thorne's")); // ASCII possessive
+        assert!(e.check("Thorne\u{2019}s")); // smart-quote possessive
+        assert!(!e.check("Thornex"));
+    }
 }

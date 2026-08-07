@@ -17,7 +17,7 @@ pub struct Token {
 
 #[inline]
 fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '\'' || c == '\u{2019}'
+    c.is_alphanumeric() || c == '\'' || c == '\u{2019}' || c == '-'
 }
 
 /// Split `src` into word tokens, excluding any whose byte range overlaps a
@@ -45,12 +45,14 @@ fn flush(src: &str, s: usize, e: usize, skip: &[Range<usize>], out: &mut Vec<Tok
     let bytes = src.as_bytes();
     let mut ws = s;
     let mut we = e;
-    // Trim surrounding ASCII apostrophes (e.g. 'hello') but keep interior ones
-    // and the Unicode right quote, which the dictionary treats as a word char.
-    while ws < we && bytes[ws] == b'\'' {
+    // Trim surrounding ASCII apostrophes and hyphens (e.g. 'hello', foo-, -bar)
+    // but keep interior ones and the Unicode right quote, which the dictionary
+    // treats as a word char. Hyphens join compound tokens (Tzeya-Gan); leading
+    // and trailing hyphens (line-break markers, `--` em-dashes at edges) drop.
+    while ws < we && (bytes[ws] == b'\'' || bytes[ws] == b'-') {
         ws += 1;
     }
-    while we > ws && bytes[we - 1] == b'\'' {
+    while we > ws && (bytes[we - 1] == b'\'' || bytes[we - 1] == b'-') {
         we -= 1;
     }
     if ws >= we {
@@ -95,5 +97,26 @@ mod tests {
         let t = tokenize("can’t", &[]);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].word, "can’t");
+    }
+
+    #[test]
+    fn hyphenated_compound_is_one_token() {
+        let t = tokenize("Tzeya-Gan rode forth", &[]);
+        let words: Vec<&str> = t.iter().map(|x| x.word.as_str()).collect();
+        assert_eq!(words, vec!["Tzeya-Gan", "rode", "forth"]);
+        // byte range covers the whole compound including the hyphen
+        assert_eq!(t[0].byte_range, 0..9);
+    }
+
+    #[test]
+    fn leading_trailing_hyphens_trimmed() {
+        // "--Athrune" (em-dash before a name) collapses to "Athrune"
+        let t = tokenize("year--another", &[]);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].word, "year--another");
+        let t2 = tokenize("Athrune--", &[]);
+        assert_eq!(t2[0].word, "Athrune");
+        let t3 = tokenize("-foo-", &[]);
+        assert_eq!(t3[0].word, "foo");
     }
 }

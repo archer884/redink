@@ -29,8 +29,6 @@ use crate::engine::Engine;
 
 type Backend = CrosstermBackend<Stdout>;
 
-const CONTEXT_LINES: usize = 4;
-
 pub fn run(miss: Vec<Misspelling>, engine: Engine) -> Result<()> {
     let mut app = App::new(miss, engine)?;
 
@@ -68,6 +66,8 @@ struct Entry {
     word_len: usize,
     word: String,
     suggestions: Vec<String>,
+    /// The whole hyphenated compound this part belongs to, if any.
+    compound: Option<String>,
 }
 
 /// An in-memory editable copy of a checked file with a line-offset index.
@@ -95,29 +95,6 @@ impl FileBuf {
             .saturating_sub(1);
         (line, byte_offset - self.line_starts[line])
     }
-
-    fn line_count(&self) -> usize {
-        self.line_starts.len()
-    }
-
-    /// Text of a 0-based line, without its trailing newline.
-    fn line_text(&self, ln: usize) -> &str {
-        let start = self.line_starts[ln];
-        let end = if ln + 1 < self.line_starts.len() {
-            // strip the trailing '\n'
-            self.line_starts[ln + 1] - 1
-        } else {
-            self.text.len()
-        };
-        let end = end.min(self.text.len());
-        // also strip a trailing '\r' (CRLF)
-        let end = if end > start && self.text.as_bytes().get(end - 1) == Some(&b'\r') {
-            end - 1
-        } else {
-            end
-        };
-        &self.text[start..end]
-    }
 }
 
 fn compute_line_starts(text: &str) -> Vec<usize> {
@@ -128,6 +105,26 @@ fn compute_line_starts(text: &str) -> Vec<usize> {
         }
     }
     starts
+}
+
+/// Collapse every run of whitespace (including newlines) into a single space,
+/// so a character window spanning paragraph boundaries reads as one flowing
+/// line of prose around the misspelled word.
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_ws = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !in_ws {
+                out.push(' ');
+                in_ws = true;
+            }
+        } else {
+            out.push(c);
+            in_ws = false;
+        }
+    }
+    out
 }
 
 struct App {
@@ -165,6 +162,7 @@ impl App {
                 word_len: m.word.len(),
                 word: m.word,
                 suggestions: m.suggestions,
+                compound: m.compound.map(|(w, _)| w),
             });
         }
         Ok(App {
@@ -221,6 +219,8 @@ impl App {
             KeyCode::Char('i') => self.ignore(),
             KeyCode::Char('a') => self.add_ci(),
             KeyCode::Char('A') => self.add_cs(),
+            KeyCode::Char('h') => self.add_compound_ci(),
+            KeyCode::Char('H') => self.add_compound_cs(),
             KeyCode::Char('r') => {
                 if let Some(w) = self.cur_word() {
                     self.mode = Mode::Replace(w.to_string());
@@ -351,16 +351,61 @@ impl App {
         ));
     }
 
+    /// The token to act on for compound operations: the whole hyphenated
+    /// compound when the focused entry is a part of one, otherwise the word.
+    fn current_token(&self) -> Option<String> {
+        self.entries.get(self.cursor).map(|e| {
+            e.compound
+                .clone()
+                .unwrap_or_else(|| e.word.clone())
+        })
+    }
+
+    /// Add the whole compound (case-insensitive) — resolves every sibling part.
+    fn add_compound_ci(&mut self) {
+        let Some(tok) = self.current_token() else {
+            return;
+        };
+        self.engine.add_ci(&tok);
+        self.persist_working("add");
+        self.retain_unresolved();
+        self.message = Some(format!(
+            "added \u{201c}{tok}\u{201d} (any case) to {}",
+            self.engine.working_path().display()
+        ));
+    }
+
+    /// Add the whole compound (exact case) — resolves every sibling part.
+    fn add_compound_cs(&mut self) {
+        let Some(tok) = self.current_token() else {
+            return;
+        };
+        self.engine.add_cs(&tok);
+        self.persist_working("add");
+        self.retain_unresolved();
+        self.message = Some(format!(
+            "added \u{201c}{tok}\u{201d} (exact case) to {}",
+            self.engine.working_path().display()
+        ));
+    }
+
     fn persist_working(&mut self, _label: &str) {
         if let Err(e) = self.engine.save_working() {
             self.message = Some(format!("could not save working dict: {e}"));
         }
     }
 
-    /// Drop entries now accepted by any dictionary layer; keep cursor valid.
+    /// Drop entries now accepted by any dictionary layer. An entry is removed
+    /// if either its part word is accepted OR the compound it belongs to (as a
+    /// whole) is accepted — so adding `Tzeya-Gan` clears both the `Tzeya` and
+    /// `Gan` parts.
     fn retain_unresolved(&mut self) {
         let engine = &self.engine;
-        self.entries.retain(|e| !engine.check(&e.word));
+        self.entries.retain(|e| {
+            let part_ok = engine.check(&e.word);
+            let compound_ok = e.compound.as_ref().is_some_and(|c| engine.check(c));
+            !part_ok && !compound_ok
+        });
         if self.cursor >= self.entries.len() {
             self.cursor = self.entries.len().saturating_sub(1);
         }
@@ -470,9 +515,15 @@ impl App {
             .constraints([Constraint::Min(3), Constraint::Length(11)])
             .split(area);
 
-        // Context
-        let context = self.context_lines();
-        let ctx_block = Block::default().borders(Borders::ALL).title("context");
+        // Context — a window of characters centered on the misspelling, so the
+        // word is always visible even when its paragraph is hundreds of words.
+        let width = chunks[0].width as usize;
+        let (context, file_label) = self.context_lines(width);
+        let title = match file_label {
+            Some(f) => format!("context \u{2014} {f}"),
+            None => "context".to_string(),
+        };
+        let ctx_block = Block::default().borders(Borders::ALL).title(title);
         let para = Paragraph::new(context).wrap(Wrap { trim: false }).block(ctx_block);
         f.render_widget(para, chunks[0]);
 
@@ -482,43 +533,65 @@ impl App {
         f.render_widget(para, chunks[1]);
     }
 
-    fn context_lines(&self) -> Vec<Line<'static>> {
+    /// A character window centered on the focused misspelling. Manuscript
+    /// drafts typically put one whole paragraph on a single line, so a
+    /// line-based window would push the word off-screen; instead we take a
+    /// fixed budget of characters on each side, collapse all whitespace runs
+    /// (including newlines) into single spaces, and mark truncation with `…`.
+    fn context_lines(&self, width: usize) -> (Vec<Line<'static>>, Option<String>) {
         let Some(entry) = self.entries.get(self.cursor) else {
-            return vec![Line::from("(no misspellings)")];
+            return (vec![Line::from("(no misspellings)")], None);
         };
         let Some(buf) = self.files.get(&entry.path) else {
-            return vec![Line::from("(file unavailable)")];
+            return (vec![Line::from("(file unavailable)")], None);
         };
-        let (line0, col0) = buf.locate(entry.current_offset);
-        let start = line0.saturating_sub(CONTEXT_LINES);
-        let end = (line0 + CONTEXT_LINES + 1).min(buf.line_count());
+        let text = buf.text.as_str();
+        let word_start = entry.current_offset;
+        let word_end = entry.current_offset + entry.word_len;
 
-        let mut out = Vec::new();
-        for ln in start..end {
-            let text = buf.line_text(ln);
-            if ln == line0 {
-                let mid = col0.min(text.len());
-                let after = (col0 + entry.word_len).min(text.len());
-                let before = &text[..mid];
-                let word = &text[mid..after];
-                let tail = &text[after..];
-                out.push(Line::from(vec![
-                    Span::raw(format!("{:>4} ", ln + 1)),
-                    Span::raw(before.to_string()),
-                    Span::styled(
-                        word.to_string(),
-                        Style::default()
-                            .fg(Color::White)
-                            .bg(Color::Red)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(tail.to_string()),
-                ]));
-            } else {
-                out.push(Line::from(format!("{:>4} {}", ln + 1, text)));
-            }
+        let cols = width.max(20).saturating_sub(2); // leave room for borders
+        // ~1.5 wrapped rows on each side of the word keeps it near the vertical
+        // center of the pane yet visible without scrolling.
+        let half = cols + cols / 2;
+
+        let mut before_start = word_start.saturating_sub(half);
+        while before_start > 0 && !text.is_char_boundary(before_start) {
+            before_start -= 1;
         }
-        out
+        let mut after_end = (word_end + half).min(text.len());
+        while after_end < text.len() && !text.is_char_boundary(after_end) {
+            after_end += 1;
+        }
+
+        let (line0, _) = buf.locate(word_start);
+        let before = collapse_ws(&text[before_start..word_start]);
+        let word = &text[word_start..word_end];
+        let after = collapse_ws(&text[word_end..after_end]);
+
+        let lead = if before_start > 0 { "\u{2026} " } else { "" };
+        let trail = if after_end < text.len() { " \u{2026}" } else { "" };
+
+        let spans = vec![
+            Span::styled(
+                format!("L{} ", line0 + 1),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(format!("{lead}{before}")),
+            Span::styled(
+                word.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("{after}{trail}")),
+        ];
+        let label = entry
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+        (vec![Line::from(spans)], label)
     }
 
     fn suggestion_lines(&self) -> Vec<Line<'static>> {
@@ -528,22 +601,27 @@ impl App {
         let Some(entry) = self.entries.get(self.cursor) else {
             return vec![Line::from("(nothing selected)")];
         };
-        if entry.suggestions.is_empty() {
-            return vec![
-                Line::from("(no suggestions)"),
-                Line::from(""),
-                Line::from("r \u{2014} type a replacement"),
-            ];
-        }
+
         let mut lines = Vec::new();
-        for (i, s) in entry.suggestions.iter().take(9).enumerate() {
-            lines.push(Line::from(format!(" {}) {}", i + 1, s)));
+        if entry.suggestions.is_empty() {
+            lines.push(Line::from("(no suggestions)"));
+            lines.push(Line::from("r \u{2014} type a replacement"));
+        } else {
+            for (i, s) in entry.suggestions.iter().take(9).enumerate() {
+                lines.push(Line::from(format!(" {}) {}", i + 1, s)));
+            }
+        }
+        if let Some(comp) = &entry.compound {
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "part of {comp} \u{2014} h add whole, H exact-case"
+            )));
         }
         lines
     }
 
     fn draw_footer(&self, f: &mut Frame<'_>, area: Rect) {
-        let hint = "j/k move \u{00b7} 1-9 replace \u{00b7} r replace \u{00b7} i ignore \u{00b7} a/A add \u{00b7} s save \u{00b7} q quit \u{00b7} ? help";
+        let hint = "j/k move \u{00b7} 1-9 replace \u{00b7} r replace \u{00b7} i ignore \u{00b7} a/A add word \u{00b7} h/H add compound \u{00b7} s save \u{00b7} q quit \u{00b7} ? help";
         let dirty = if self.dirty.is_empty() {
             String::new()
         } else {
@@ -569,8 +647,10 @@ impl App {
             Line::from("  1-9         replace with Nth suggestion"),
             Line::from("  r           type a replacement (Enter/Esc)"),
             Line::from("  i           ignore this word for the session"),
-            Line::from("  a           add lowercase (case-insensitive)"),
-            Line::from("  A           add exact-case (case-sensitive)"),
+            Line::from("  a           add word, lowercase (case-insensitive)"),
+            Line::from("  A           add word, exact-case (case-sensitive)"),
+            Line::from("  h           add whole compound (case-insensitive)"),
+            Line::from("  H           add whole compound (exact case)"),
             Line::from("  s           save all edited files now"),
             Line::from("  q           save and quit"),
             Line::from("  Q           discard edits and quit"),

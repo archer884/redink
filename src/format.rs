@@ -57,6 +57,7 @@ fn markdown_skip(src: &str) -> Vec<Range<usize>> {
     for (event, range) in Parser::new(src).into_offset_iter() {
         match event {
             Event::Code(_) => skips.push(range),
+            Event::Html(_) | Event::InlineHtml(_) => skips.push(range),
             Event::Start(Tag::CodeBlock(_)) => code_depth += 1,
             Event::End(TagEnd::CodeBlock) => code_depth = code_depth.saturating_sub(1),
             Event::Text(_) if code_depth > 0 => skips.push(range),
@@ -140,5 +141,23 @@ mod tests {
         let src = "---\ntitle: Hi\n---\nbody word";
         let r = frontmatter_range(src).unwrap();
         assert_eq!(r, 0..src.find("body").unwrap());
+    }
+
+    #[test]
+    fn html_comment_is_skipped() {
+        let src = "intro text\n\n<!-- TODO hidden ZZZXYZ -->\n\noutro text";
+        let skips = markdown_skip(src);
+        let toks = crate::token::tokenize(src, &skips);
+        let words: Vec<&str> = toks.iter().map(|t| t.word.as_str()).collect();
+        assert!(words.contains(&"intro"));
+        assert!(words.contains(&"outro"));
+        assert!(
+            !words.contains(&"ZZZXYZ"),
+            "comment contents leaked into tokens: {words:?}"
+        );
+        assert!(
+            !words.contains(&"hidden"),
+            "comment word 'hidden' leaked: {words:?}"
+        );
     }
 }
