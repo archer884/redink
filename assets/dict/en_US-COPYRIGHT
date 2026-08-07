@@ -345,3 +345,15 @@ and Australian word list.  It is under the following copyright:
 
 Build Date: Mon Dec  7 20:19:27 EST 2020
 Wordlist Command: mk-list --accents=strip en_US 60
+
+---
+Local modifications (redink)
+============================
+
+The vendored en_US.dic differs from upstream SCOWL 2020.12.07 by the
+following local patch. Re-apply if re-vendoring.
+
+  en_US.dic line for "else": changed `else` -> `else/M`
+    Reason: "else" lacked the possessive (M) flag, so valid forms like
+    "anyone else's" were flagged as misspelled. "else/M" makes "else's"
+    recognized, consistent with peers (someone/MS, anyone/M, today/M).

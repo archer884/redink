@@ -175,4 +175,16 @@ mod tests {
         assert!(e.check("Atrax"));
         assert!(e.check("Atrax's"));
     }
+
+    /// Regression guard for the local dict patch (en_US.dic: `else` -> `else/M`).
+    /// Catches a re-vendor that drops the patch.
+    #[test]
+    fn vendored_dict_accepts_else_possessive() {
+        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
+        assert!(e.check("else"));
+        assert!(e.check("else's"), "local patch else->else/M missing?");
+        assert!(e.check("anyone else's".split(' ').nth(1).unwrap()));
+    }
 }
