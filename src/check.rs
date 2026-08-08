@@ -20,7 +20,7 @@ pub struct Misspelling {
     /// Absolute byte offset of the word start in the file.
     pub byte_offset: usize,
     pub word: String,
-    pub suggestions: Vec<String>,
+    pub suggestions: Option<Vec<String>>,
     /// If this occurrence is a part of a hyphenated compound that was not
     /// recognized as a whole, the full token text and its byte range. `None`
     /// for plain (non-compound) words.
@@ -34,6 +34,7 @@ pub fn check_file(
     engine: &Engine,
     suggest_cache: &mut HashMap<String, Vec<String>>,
     suggest_limit: usize,
+    needs_suggestions: bool,
 ) -> Result<Vec<Misspelling>> {
     let src = std::fs::read_to_string(path)?;
     let line_starts = LineStarts::new(&src);
@@ -72,6 +73,7 @@ pub fn check_file(
                     engine,
                     suggest_cache,
                     suggest_limit,
+                    needs_suggestions,
                 ));
             }
         } else {
@@ -87,6 +89,7 @@ pub fn check_file(
                 engine,
                 suggest_cache,
                 suggest_limit,
+                needs_suggestions,
             ));
         }
     }
@@ -121,15 +124,22 @@ fn build_misspelling(
     engine: &Engine,
     suggest_cache: &mut HashMap<String, Vec<String>>,
     suggest_limit: usize,
+    needs_suggestions: bool,
 ) -> Misspelling {
     let (line0, col0) = line_starts.locate(byte_range.start);
-    let suggestions = suggest_cache
-        .entry(word.to_string())
-        .or_insert_with(|| engine.suggest(word))
-        .iter()
-        .take(suggest_limit)
-        .cloned()
-        .collect::<Vec<_>>();
+    let suggestions = if needs_suggestions {
+        Some(
+            suggest_cache
+                .entry(word.to_string())
+                .or_insert_with(|| engine.suggest(word))
+                .iter()
+                .take(suggest_limit)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
     Misspelling {
         path: path.to_path_buf(),
         line: line0 + 1,
@@ -235,7 +245,7 @@ mod tests {
             std::path::PathBuf::from("/dev/null"),
         );
         let mut cache = HashMap::new();
-        let miss = check_file(&path, Format::Auto, &engine, &mut cache, 9).unwrap();
+        let miss = check_file(&path, Format::Auto, &engine, &mut cache, 9, true).unwrap();
         miss.into_iter().map(|m| m.word).collect()
     }
 

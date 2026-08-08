@@ -72,7 +72,10 @@ fn markdown_skip(src: &str) -> Vec<Range<usize>> {
 /// Detect a leading YAML/TOML frontmatter block delimited by `---` lines.
 fn frontmatter_range(src: &str) -> Option<Range<usize>> {
     let bytes = src.as_bytes();
-    let first_nl = bytes.iter().position(|&b| b == b'\n').unwrap_or(bytes.len());
+    let first_nl = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
     if &bytes[..first_nl] != b"---" {
         return None;
     }

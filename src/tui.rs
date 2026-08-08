@@ -48,7 +48,11 @@ pub fn run(miss: Vec<Misspelling>, engine: Engine) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     let result = app.main_loop(&mut terminal);
     // Normal-path teardown (the guard covers the panic case).
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
     result
 }
 
@@ -65,7 +69,7 @@ struct Entry {
     current_offset: usize,
     word_len: usize,
     word: String,
-    suggestions: Vec<String>,
+    suggestions: Option<Vec<String>>,
     /// The whole hyphenated compound this part belongs to, if any.
     compound: Option<String>,
 }
@@ -133,6 +137,7 @@ struct App {
     files: HashMap<std::path::PathBuf, FileBuf>,
     dirty: HashSet<std::path::PathBuf>,
     engine: Engine,
+    suggest_cache: HashMap<String, Vec<String>>,
     mode: Mode,
     show_help: bool,
     message: Option<String>,
@@ -171,6 +176,7 @@ impl App {
             files,
             dirty: HashSet::new(),
             engine,
+            suggest_cache: HashMap::new(),
             mode: Mode::Normal,
             show_help: false,
             message: None,
@@ -279,9 +285,10 @@ impl App {
         self.entries.get(self.cursor).map(|e| e.word.as_str())
     }
 
-    fn cur_suggestion(&self, n: usize) -> Option<String> {
+    fn cur_suggestion(&mut self, n: usize) -> Option<String> {
+        self.ensure_suggestions_for_current();
         let e = self.entries.get(self.cursor)?;
-        e.suggestions.get(n - 1).cloned()
+        e.suggestions.as_ref()?.get(n - 1).cloned()
     }
 
     /// Replace the current word with `new_word`, shifting later offsets.
@@ -305,8 +312,7 @@ impl App {
         if delta != 0 {
             for e in self.entries.iter_mut() {
                 if e.path == path && e.current_offset >= end {
-                    e.current_offset =
-                        (e.current_offset as isize + delta).max(0) as usize;
+                    e.current_offset = (e.current_offset as isize + delta).max(0) as usize;
                 }
             }
         }
@@ -357,11 +363,9 @@ impl App {
     /// The token to act on for compound operations: the whole hyphenated
     /// compound when the focused entry is a part of one, otherwise the word.
     fn current_token(&self) -> Option<String> {
-        self.entries.get(self.cursor).map(|e| {
-            e.compound
-                .clone()
-                .unwrap_or_else(|| e.word.clone())
-        })
+        self.entries
+            .get(self.cursor)
+            .map(|e| e.compound.clone().unwrap_or_else(|| e.word.clone()))
     }
 
     /// Add the whole compound (case-insensitive) — resolves every sibling part.
@@ -432,12 +436,27 @@ impl App {
         n
     }
 
+    fn ensure_suggestions_for_current(&mut self) {
+        if let Some(entry) = self.entries.get_mut(self.cursor) {
+            if entry.suggestions.is_none() {
+                let sugs = self
+                    .suggest_cache
+                    .entry(entry.word.clone())
+                    .or_insert_with(|| self.engine.suggest(&entry.word))
+                    .clone();
+                entry.suggestions = Some(sugs);
+            }
+        }
+    }
+
     fn draw(&mut self, f: &mut Frame<'_>) {
+        self.ensure_suggestions_for_current();
+
         let area = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // title
+                Constraint::Length(1), // title
                 Constraint::Min(5),    // body
                 Constraint::Length(2), // footer
             ])
@@ -486,12 +505,7 @@ impl App {
                     .get(&e.path)
                     .map(|b| b.locate(e.current_offset).0 + 1)
                     .unwrap_or(0);
-                Line::from(format!(
-                    "{}:{}  {}",
-                    e.path.display(),
-                    line,
-                    e.word
-                ))
+                Line::from(format!("{}:{}  {}", e.path.display(), line, e.word))
             })
             .collect();
 
@@ -529,7 +543,9 @@ impl App {
             None => "context".to_string(),
         };
         let ctx_block = Block::default().borders(Borders::ALL).title(title);
-        let para = Paragraph::new(context).wrap(Wrap { trim: false }).block(ctx_block);
+        let para = Paragraph::new(context)
+            .wrap(Wrap { trim: false })
+            .block(ctx_block);
         f.render_widget(para, chunks[0]);
 
         // Suggestions / input
@@ -555,8 +571,8 @@ impl App {
         let word_end = entry.current_offset + entry.word_len;
 
         let cols = width.max(20).saturating_sub(2); // leave room for borders
-        // ~1.5 wrapped rows on each side of the word keeps it near the vertical
-        // center of the pane yet visible without scrolling.
+                                                    // ~1.5 wrapped rows on each side of the word keeps it near the vertical
+                                                    // center of the pane yet visible without scrolling.
         let half = cols + cols / 2;
 
         let mut before_start = word_start.saturating_sub(half);
@@ -574,7 +590,11 @@ impl App {
         let after = collapse_ws(&text[word_end..after_end]);
 
         let lead = if before_start > 0 { "\u{2026} " } else { "" };
-        let trail = if after_end < text.len() { " \u{2026}" } else { "" };
+        let trail = if after_end < text.len() {
+            " \u{2026}"
+        } else {
+            ""
+        };
 
         let spans = vec![
             Span::styled(
@@ -608,11 +628,12 @@ impl App {
         };
 
         let mut lines = Vec::new();
-        if entry.suggestions.is_empty() {
+        let suggestions = entry.suggestions.as_deref().unwrap_or(&[]);
+        if suggestions.is_empty() {
             lines.push(Line::from("(no suggestions)"));
             lines.push(Line::from("r \u{2014} type a replacement"));
         } else {
-            for (i, s) in entry.suggestions.iter().take(9).enumerate() {
+            for (i, s) in suggestions.iter().take(9).enumerate() {
                 lines.push(Line::from(format!(" {}) {}", i + 1, s)));
             }
         }

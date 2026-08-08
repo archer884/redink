@@ -59,7 +59,10 @@ fn flush(src: &str, s: usize, e: usize, skip: &[Range<usize>], out: &mut Vec<Tok
         return;
     }
     let range = ws..we;
-    if skip.iter().any(|r| range.start < r.end && range.end > r.start) {
+    if skip
+        .iter()
+        .any(|r| range.start < r.end && range.end > r.start)
+    {
         return;
     }
     let word = &src[range.clone()];

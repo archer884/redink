@@ -32,7 +32,11 @@ fn main() -> ExitCode {
 }
 
 fn run(args: cli::Cli) -> Result<ExitCode> {
-    let cli::Cli { opts, command, files } = args;
+    let cli::Cli {
+        opts,
+        command,
+        files,
+    } = args;
 
     match command {
         Some(Command::Fix { file, at, word, to }) => {
@@ -45,7 +49,8 @@ fn run(args: cli::Cli) -> Result<ExitCode> {
         }
         Some(Command::Check { files, json, words }) => {
             let engine = build_engine(&opts)?;
-            let miss = check_all(&files, opts.format, &engine)?;
+            let needs_suggestions = !words;
+            let miss = check_all(&files, opts.format, &engine, needs_suggestions)?;
             let found = !miss.is_empty();
             let mut out = std::io::stdout().lock();
             if json {
@@ -58,33 +63,45 @@ fn run(args: cli::Cli) -> Result<ExitCode> {
             if found && !json {
                 eprintln!("{}", report::summary(&miss));
             }
-            Ok(if found { ExitCode::from(1) } else { ExitCode::SUCCESS })
+            Ok(if found {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            })
         }
         Some(Command::Tui { files }) => {
             let engine = build_engine(&opts)?;
-            let miss = check_all(&files, opts.format, &engine)?;
+            let miss = check_all(&files, opts.format, &engine, false)?;
             tui::run(miss, engine)?;
             Ok(ExitCode::SUCCESS)
         }
         None => {
             // No subcommand: files given on the command line (or, if none,
             // everything checkable in the cwd). TUI if interactive, else check.
-            let files = if files.is_empty() { discover_files() } else { files };
+            let files = if files.is_empty() {
+                discover_files()
+            } else {
+                files
+            };
             if std::io::stdout().is_terminal() {
                 let engine = build_engine(&opts)?;
-                let miss = check_all(&files, opts.format, &engine)?;
+                let miss = check_all(&files, opts.format, &engine, false)?;
                 tui::run(miss, engine)?;
                 Ok(ExitCode::SUCCESS)
             } else {
                 let engine = build_engine(&opts)?;
-                let miss = check_all(&files, opts.format, &engine)?;
+                let miss = check_all(&files, opts.format, &engine, true)?;
                 let found = !miss.is_empty();
                 let mut out = std::io::stdout().lock();
                 report::write_text(&mut out, &miss)?;
                 if found {
                     eprintln!("{}", report::summary(&miss));
                 }
-                Ok(if found { ExitCode::from(1) } else { ExitCode::SUCCESS })
+                Ok(if found {
+                    ExitCode::from(1)
+                } else {
+                    ExitCode::SUCCESS
+                })
             }
         }
     }
@@ -105,16 +122,58 @@ fn build_engine(opts: &cli::GlobalOpts) -> Result<Engine> {
     Ok(engine)
 }
 
-fn check_all(files: &[PathBuf], fmt: format::Format, engine: &Engine) -> Result<Vec<check::Misspelling>> {
+use rayon::prelude::*;
+
+fn check_all(
+    files: &[PathBuf],
+    fmt: format::Format,
+    engine: &Engine,
+    needs_suggestions: bool,
+) -> Result<Vec<check::Misspelling>> {
     let files = resolve_files(files);
-    let mut cache = std::collections::HashMap::new();
-    let mut miss = Vec::new();
-    for f in &files {
-        match check::check_file(f, fmt, engine, &mut cache, SUGGEST_LIMIT) {
-            Ok(m) => miss.extend(m),
-            Err(e) => eprintln!("redink: skipping {}: {e}", f.display()),
+
+    // Step 1: Check all files in parallel, initially without computing suggestions
+    // (since suggestion generation is the slow part and we want to deduplicate it).
+    let mut miss: Vec<check::Misspelling> = files
+        .into_par_iter()
+        .flat_map(|f| {
+            // We pass a dummy cache since needs_suggestions=false means it won't be used.
+            let mut cache = std::collections::HashMap::new();
+            match check::check_file(&f, fmt, engine, &mut cache, SUGGEST_LIMIT, false) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("redink: skipping {}: {e}", f.display());
+                    Vec::new()
+                }
+            }
+        })
+        .collect();
+
+    // Step 2: If suggestions are needed, gather unique misspelled words,
+    // compute their suggestions in parallel, and attach them.
+    if needs_suggestions && !miss.is_empty() {
+        let unique_words: std::collections::HashSet<String> =
+            miss.iter().map(|m| m.word.clone()).collect();
+
+        let suggest_cache: std::collections::HashMap<String, Vec<String>> = unique_words
+            .into_par_iter()
+            .map(|word| {
+                let sugs = engine
+                    .suggest(&word)
+                    .into_iter()
+                    .take(SUGGEST_LIMIT)
+                    .collect();
+                (word, sugs)
+            })
+            .collect();
+
+        for m in &mut miss {
+            if let Some(sugs) = suggest_cache.get(&m.word) {
+                m.suggestions = Some(sugs.clone());
+            }
         }
     }
+
     Ok(miss)
 }
 
@@ -148,7 +207,10 @@ fn discover_files() -> Vec<PathBuf> {
 
 fn is_checkable_ext(p: &Path) -> bool {
     matches!(
-        p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
         Some("md" | "markdown" | "mdown" | "mkd" | "txt" | "text")
     )
 }
@@ -195,7 +257,12 @@ fn run_dict(opts: &cli::GlobalOpts, action: DictAction) -> Result<()> {
                 }
             }
             dict::save(&working_path, &d)?;
-            eprintln!("added {} entr{} to {}", words.len(), if words.len() == 1 { "y" } else { "ies" }, working_path.display());
+            eprintln!(
+                "added {} entr{} to {}",
+                words.len(),
+                if words.len() == 1 { "y" } else { "ies" },
+                working_path.display()
+            );
         }
         DictAction::Remove { words } => {
             let mut d = dict::load(&working_path)?;
