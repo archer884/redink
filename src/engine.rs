@@ -17,9 +17,11 @@ use crate::dict::{canonical, strip_possessive, WorkingDict};
 /// Minimum character length for a suggestion to be shown. Shorter ones are
 /// almost always noise (e.g. "e", "s", "es").
 const MIN_SUGGEST_LEN: usize = 3;
+const CUSTOM_SUGGEST_LIMIT: usize = 3;
 
 pub struct Engine {
     dict: Dictionary,
+    custom_dict: Dictionary,
     working_path: PathBuf,
     working_ci: HashSet<String>,
     working_cs: HashSet<String>,
@@ -31,8 +33,10 @@ pub struct Engine {
 impl Engine {
     pub fn new(dict: Dictionary, working: WorkingDict, working_path: PathBuf) -> Self {
         let phrase_bigrams = crate::dict::build_phrase_bigrams(&working.phrases);
+        let custom_dict = build_custom_dict(&working.ci, &working.cs);
         Self {
             dict,
+            custom_dict,
             working_path,
             working_ci: working.ci,
             working_cs: working.cs,
@@ -85,12 +89,27 @@ impl Engine {
         false
     }
 
-    /// Suggested corrections for `word` from the system dictionary. Very short
-    /// suggestions (< 3 characters) are dropped — they're mostly noise.
+    /// Suggested corrections for `word`, with up to three working-dictionary
+    /// results before system-dictionary results. Very short suggestions (< 3
+    /// characters) are dropped — they're mostly noise.
     pub fn suggest(&self, word: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        self.dict.checker().into_suggester().suggest(word, &mut out);
-        out.retain(|s| s.chars().count() >= MIN_SUGGEST_LEN);
+        let mut custom = Vec::new();
+        self.custom_dict
+            .checker()
+            .into_suggester()
+            .suggest(word, &mut custom);
+        custom.retain(|s| s.chars().count() >= MIN_SUGGEST_LEN);
+
+        let mut out = custom.into_iter().take(CUSTOM_SUGGEST_LIMIT).collect::<Vec<_>>();
+
+        let mut system = Vec::new();
+        self.dict.checker().into_suggester().suggest(word, &mut system);
+        system.retain(|s| s.chars().count() >= MIN_SUGGEST_LEN);
+        for suggestion in system {
+            if !out.contains(&suggestion) {
+                out.push(suggestion);
+            }
+        }
         out
     }
 
@@ -103,13 +122,17 @@ impl Engine {
     /// Add a case-insensitive entry (accepted in any casing). The possessive
     /// stem is stored, so adding "Atrax's" registers "Atrax". Persists on save.
     pub fn add_ci(&mut self, word: &str) {
-        self.working_ci.insert(canonical(word).to_lowercase());
+        let word = canonical(word).to_lowercase();
+        self.working_ci.insert(word.clone());
+        let _ = self.custom_dict.add(&word);
     }
 
     /// Add a case-sensitive entry (exact casing only). The possessive stem is
     /// stored. Persists on save.
     pub fn add_cs(&mut self, word: &str) {
-        self.working_cs.insert(canonical(word));
+        let word = canonical(word);
+        self.working_cs.insert(word.clone());
+        let _ = self.custom_dict.add(&word);
     }
 
     /// Remove an entry (matches either layer; possessive-insensitive).
@@ -119,7 +142,11 @@ impl Engine {
         let c = canonical(word);
         let a = self.working_ci.remove(&c.to_lowercase());
         let b = self.working_cs.remove(&c);
-        a || b
+        let removed = a || b;
+        if removed {
+            self.custom_dict = build_custom_dict(&self.working_ci, &self.working_cs);
+        }
+        removed
     }
 
     /// The merged phrase-bigram set (bundled Latin list + project phrases),
@@ -137,6 +164,14 @@ impl Engine {
         };
         crate::dict::save(&self.working_path, &dict)
     }
+}
+
+fn build_custom_dict(ci: &HashSet<String>, cs: &HashSet<String>) -> Dictionary {
+    let mut dict = Dictionary::new("", "0\n").expect("empty dictionary is valid");
+    for word in ci.iter().chain(cs.iter()) {
+        let _ = dict.add(word);
+    }
+    dict
 }
 
 /// Parse raw `.aff`/`.dic` text into a [`Dictionary`], mapping spellbook's
@@ -215,5 +250,22 @@ mod tests {
         let sugs = e.suggest("se");
         assert!(sugs.iter().all(|s| s.chars().count() >= 3), "short leak: {sugs:?}");
         assert!(sugs.contains(&"see".to_string()));
+    }
+
+    #[test]
+    fn suggestions_include_working_dictionary() {
+        let e = engine_with_ci("Thorne");
+        let sugs = e.suggest("Thorn");
+        assert!(sugs.contains(&"Thorne".to_string()), "custom suggestion missing: {sugs:?}");
+    }
+
+    #[test]
+    fn suggestions_include_entries_added_after_startup() {
+        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let mut e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
+        e.add_cs("Gondor");
+        let sugs = e.suggest("gondr");
+        assert!(sugs.contains(&"Gondor".to_string()), "custom suggestion missing: {sugs:?}");
     }
 }
