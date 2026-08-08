@@ -100,10 +100,16 @@ impl Engine {
             .suggest(word, &mut custom);
         custom.retain(|s| s.chars().count() >= MIN_SUGGEST_LEN);
 
-        let mut out = custom.into_iter().take(CUSTOM_SUGGEST_LIMIT).collect::<Vec<_>>();
+        let mut out = custom
+            .into_iter()
+            .take(CUSTOM_SUGGEST_LIMIT)
+            .collect::<Vec<_>>();
 
         let mut system = Vec::new();
-        self.dict.checker().into_suggester().suggest(word, &mut system);
+        self.dict
+            .checker()
+            .into_suggester()
+            .suggest(word, &mut system);
         system.retain(|s| s.chars().count() >= MIN_SUGGEST_LEN);
         for suggestion in system {
             if !out.contains(&suggestion) {
@@ -187,7 +193,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn engine_with_ci(word: &str) -> Engine {
-        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let sys = crate::sysdict::resolve_embedded();
         let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
         let mut wd = WorkingDict::default();
         wd.add_ci(word);
@@ -208,7 +214,7 @@ mod tests {
     fn add_via_possessive_form_registers_stem() {
         // Focused on "Atrax's", pressing add should register the stem "Atrax",
         // which then accepts both "Atrax" and "Atrax's".
-        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let sys = crate::sysdict::resolve_embedded();
         let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
         let wd = WorkingDict::default();
         let mut e = Engine::new(dict, wd, PathBuf::from("/dev/null"));
@@ -220,7 +226,7 @@ mod tests {
 
     #[test]
     fn ignore_via_possessive_suppresses_stem() {
-        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let sys = crate::sysdict::resolve_embedded();
         let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
         let wd = WorkingDict::default();
         let mut e = Engine::new(dict, wd, PathBuf::from("/dev/null"));
@@ -233,7 +239,7 @@ mod tests {
     /// Catches a re-vendor that drops the patch.
     #[test]
     fn vendored_dict_accepts_else_possessive() {
-        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let sys = crate::sysdict::resolve_embedded();
         let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
         let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
         assert!(e.check("else"));
@@ -243,12 +249,15 @@ mod tests {
 
     #[test]
     fn suggestions_drop_very_short() {
-        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let sys = crate::sysdict::resolve_embedded();
         let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
         let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
         // "se" would otherwise yield 1-2 char noise like "e", "s", "es".
         let sugs = e.suggest("se");
-        assert!(sugs.iter().all(|s| s.chars().count() >= 3), "short leak: {sugs:?}");
+        assert!(
+            sugs.iter().all(|s| s.chars().count() >= 3),
+            "short leak: {sugs:?}"
+        );
         assert!(sugs.contains(&"see".to_string()));
     }
 
@@ -256,16 +265,22 @@ mod tests {
     fn suggestions_include_working_dictionary() {
         let e = engine_with_ci("Thorne");
         let sugs = e.suggest("Thorn");
-        assert!(sugs.contains(&"Thorne".to_string()), "custom suggestion missing: {sugs:?}");
+        assert!(
+            sugs.contains(&"Thorne".to_string()),
+            "custom suggestion missing: {sugs:?}"
+        );
     }
 
     #[test]
     fn suggestions_include_entries_added_after_startup() {
-        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let sys = crate::sysdict::resolve_embedded();
         let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
         let mut e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
         e.add_cs("Gondor");
         let sugs = e.suggest("gondr");
-        assert!(sugs.contains(&"Gondor".to_string()), "custom suggestion missing: {sugs:?}");
+        assert!(
+            sugs.contains(&"Gondor".to_string()),
+            "custom suggestion missing: {sugs:?}"
+        );
     }
 }

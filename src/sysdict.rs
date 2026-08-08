@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// Directories searched, in order, on both macOS and Linux.
 fn system_dirs() -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = vec![
+    let v: Vec<PathBuf> = vec![
         // Linux
         "/usr/share/hunspell".into(),
         "/usr/share/myspell".into(),
@@ -17,13 +17,14 @@ fn system_dirs() -> Vec<PathBuf> {
         "/usr/local/share/hunspell".into(),
         "/usr/lib/hunspell".into(),
         // macOS
-        "/Library/Spelling".into(),
         "/opt/homebrew/share/hunspell".into(),
         "/usr/local/share/hunspell".into(),
     ];
-    if let Some(home) = std::env::var_os("HOME") {
-        v.push(PathBuf::from(home).join("Library/Spelling"));
-    }
+    // Apple's NSSpellChecker stores dictionaries in ~/Library/Spelling, but
+    // corrupts the .dic files by appending tab-separated frequency counts
+    // (e.g., "aah\t1") which breaks strict Hunspell parsers like `spellbook`.
+    // We intentionally omit ~/Library/Spelling and /Library/Spelling to force
+    // fallback to the embedded SCOWL dictionary (or Homebrew's hunspell).
     v
 }
 
@@ -89,4 +90,15 @@ Or point at a directory with {lang}.aff and {lang}.dic via --sysdict-dir <DIR>",
             .collect::<Vec<_>>()
             .join(", "),
     )
+}
+
+/// For unit tests: explicitly load the embedded fallback dictionary so that
+/// tests remain deterministic even if the host machine has system dictionaries.
+#[cfg(test)]
+pub fn resolve_embedded() -> SystemDict {
+    SystemDict {
+        aff: EMBEDDED_AFF.to_string(),
+        dic: EMBEDDED_DIC.to_string(),
+        source: "embedded (SCOWL en_US 2020.12.07, size 60)".to_string(),
+    }
 }

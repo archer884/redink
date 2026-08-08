@@ -210,11 +210,7 @@ mod tests {
         let parts = split_hyphen_parts("Seneca-by-Stone", 10);
         assert_eq!(
             parts,
-            vec![
-                ("Seneca", 10..16),
-                ("by", 17..19),
-                ("Stone", 20..25),
-            ]
+            vec![("Seneca", 10..16), ("by", 17..19), ("Stone", 20..25),]
         );
     }
 
@@ -231,7 +227,7 @@ mod tests {
         let path = dir.join("x.md");
         std::fs::write(&path, src).unwrap();
 
-        let sys = crate::sysdict::resolve("en_US", None).unwrap();
+        let sys = crate::sysdict::resolve_embedded();
         let dict = crate::engine::load_dictionary(&sys.aff, &sys.dic).unwrap();
         let engine = crate::engine::Engine::new(
             dict,
