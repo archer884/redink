@@ -437,15 +437,15 @@ impl App {
     }
 
     fn ensure_suggestions_for_current(&mut self) {
-        if let Some(entry) = self.entries.get_mut(self.cursor) {
-            if entry.suggestions.is_none() {
-                let sugs = self
-                    .suggest_cache
-                    .entry(entry.word.clone())
-                    .or_insert_with(|| self.engine.suggest(&entry.word))
-                    .clone();
-                entry.suggestions = Some(sugs);
-            }
+        if let Some(entry) = self.entries.get_mut(self.cursor)
+            && entry.suggestions.is_none()
+        {
+            let sugs = self
+                .suggest_cache
+                .entry(entry.word.clone())
+                .or_insert_with(|| self.engine.suggest(&entry.word))
+                .clone();
+            entry.suggestions = Some(sugs);
         }
     }
 
