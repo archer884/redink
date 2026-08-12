@@ -243,26 +243,27 @@ fn run_dict(opts: &cli::GlobalOpts, action: DictAction) -> Result<()> {
         }
         DictAction::Add { words, sensitive } => {
             let mut d = dict::load(&working_path)?;
+            let mut added = 0usize;
+            let mut duplicates: Vec<String> = Vec::new();
             for w in &words {
-                if w.chars().any(char::is_whitespace) {
-                    // A multi-word argument is a phrase, matched as bigrams.
-                    let norm: String = w.split_whitespace().collect::<Vec<_>>().join(" ");
-                    if norm.split(' ').count() >= 2 {
-                        d.phrases.insert(norm.to_lowercase());
-                    }
-                } else if sensitive {
-                    d.add_cs(w);
-                } else {
-                    d.add_ci(w);
+                match d.add_entry(w, sensitive) {
+                    dict::AddOutcome::Added => added += 1,
+                    dict::AddOutcome::Duplicate => duplicates.push(w.clone()),
+                    dict::AddOutcome::Ignored => {}
                 }
             }
             dict::save(&working_path, &d)?;
-            eprintln!(
-                "added {} entr{} to {}",
-                words.len(),
-                if words.len() == 1 { "y" } else { "ies" },
-                working_path.display()
-            );
+            if added != 0 {
+                eprintln!(
+                    "added {} entr{} to {}",
+                    added,
+                    if added == 1 { "y" } else { "ies" },
+                    working_path.display()
+                );
+            }
+            if !duplicates.is_empty() {
+                eprintln!("already present: {}", duplicates.join(", "));
+            }
         }
         DictAction::Remove { words } => {
             let mut d = dict::load(&working_path)?;

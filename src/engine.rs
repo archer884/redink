@@ -92,7 +92,36 @@ impl Engine {
     /// Suggested corrections for `word`, with up to three working-dictionary
     /// results before system-dictionary results. Very short suggestions (< 3
     /// characters) are dropped — they're mostly noise.
+    ///
+    /// Possessive-aware, mirroring [`Engine::check`]: when `word` ends in
+    /// `'s`, suggestions are also generated against the stem and the possessive
+    /// is re-attached, so a misspelling like `Thryi's` surfaces `Thyri's` when
+    /// `Thyri` is in the working dictionary. Without this, the stem is never
+    /// consulted and a nearby coinage is invisible to the suggester even though
+    /// `check` would have accepted it.
     pub fn suggest(&self, word: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Some(stem) = strip_possessive(word) {
+            let suffix = &word[stem.len()..];
+            for s in self.suggest_forms(stem) {
+                let mut form = s;
+                form.push_str(suffix);
+                if !out.contains(&form) {
+                    out.push(form);
+                }
+            }
+        }
+        for s in self.suggest_forms(word) {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        out
+    }
+
+    /// Working-dictionary (up to three) then system-dictionary suggestions for
+    /// a single form, with sub-`MIN_SUGGEST_LEN` results dropped.
+    fn suggest_forms(&self, word: &str) -> Vec<String> {
         let mut custom = Vec::new();
         self.custom_dict
             .checker()
@@ -282,5 +311,46 @@ mod tests {
             sugs.contains(&"Gondor".to_string()),
             "custom suggestion missing: {sugs:?}"
         );
+    }
+
+    /// Regression: a misspelled possessive must surface a working-dict stem
+    /// with the possessive re-attached. Before the fix, `suggest` did not
+    /// strip the possessive (unlike `check`), so `Thryi's` could not see
+    /// `Thyri` and the user registered the typo `Thryi` as a coinage.
+    #[test]
+    fn suggest_possessive_finds_ci_stem() {
+        let e = engine_with_ci("Thyri");
+        let sugs = e.suggest("Thryi's");
+        assert!(
+            sugs.contains(&"Thyri's".to_string()),
+            "expected Thyri's (re-attached) in {sugs:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_possessive_finds_cs_stem() {
+        let sys = crate::sysdict::resolve_embedded();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let mut e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
+        e.add_cs("Thyri");
+        let sugs = e.suggest("Thryi's");
+        assert!(
+            sugs.contains(&"Thyri's".to_string()),
+            "expected Thyri's (re-attached) in {sugs:?}"
+        );
+    }
+
+    /// The re-attached form should rank ahead of unrelated full-token matches,
+    /// since the possessive form is the most likely intent.
+    #[test]
+    fn suggest_possessive_prioritizes_stem_derived() {
+        let e = engine_with_ci("Thyri");
+        let sugs = e.suggest("Thryi's");
+        let stem_idx = sugs.iter().position(|s| s == "Thyri's");
+        let other_idx = sugs.iter().position(|s| s == "Thrift's");
+        assert!(stem_idx.is_some(), "Thyri's missing: {sugs:?}");
+        if let (Some(stem), Some(other)) = (stem_idx, other_idx) {
+            assert!(stem < other, "stem-derived should precede system: {sugs:?}");
+        }
     }
 }

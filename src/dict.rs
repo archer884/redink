@@ -137,7 +137,46 @@ pub fn canonical(word: &str) -> String {
     strip_possessive(word).unwrap_or(word).to_string()
 }
 
+/// Outcome of a working-dictionary add: a word may be newly inserted, already
+/// present (same layer), or ignored as a malformed phrase (a multi-word entry
+/// that collapses to fewer than two tokens).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddOutcome {
+    Added,
+    Duplicate,
+    Ignored,
+}
+
 impl WorkingDict {
+    /// Add a word (or phrase) on the appropriate layer, returning whether it
+    /// was newly inserted, already present, or ignored. Consolidates the
+    /// phrase-detection logic so the CLI add path can report accurately rather
+    /// than always crediting every requested word.
+    pub fn add_entry(&mut self, word: &str, sensitive: bool) -> AddOutcome {
+        if word.chars().any(char::is_whitespace) {
+            let norm: String = word.split_whitespace().collect::<Vec<_>>().join(" ");
+            if norm.split(' ').count() >= 2 {
+                if self.phrases.insert(norm.to_lowercase()) {
+                    AddOutcome::Added
+                } else {
+                    AddOutcome::Duplicate
+                }
+            } else {
+                AddOutcome::Ignored
+            }
+        } else if sensitive {
+            if self.add_cs(word) {
+                AddOutcome::Added
+            } else {
+                AddOutcome::Duplicate
+            }
+        } else if self.add_ci(word) {
+            AddOutcome::Added
+        } else {
+            AddOutcome::Duplicate
+        }
+    }
+
     pub fn add_ci(&mut self, word: &str) -> bool {
         self.ci.insert(canonical(word).to_lowercase())
     }
@@ -315,6 +354,32 @@ mod tests {
         // a plain word is unchanged
         d.add_ci("hobbit");
         assert!(d.ci.contains("hobbit"));
+    }
+
+    #[test]
+    fn add_entry_reports_outcome() {
+        let mut d = WorkingDict::default();
+        // case-insensitive: first add is new, second is a duplicate.
+        assert_eq!(d.add_entry("hobbit", false), AddOutcome::Added);
+        assert_eq!(d.add_entry("hobbit", false), AddOutcome::Duplicate);
+        // canonicalization: adding the possessive form finds the stem present.
+        assert_eq!(d.add_entry("Hobbit's", false), AddOutcome::Duplicate);
+        // a differently-cased token still hits the same CI entry.
+        assert_eq!(d.add_entry("HOBBIT", false), AddOutcome::Duplicate);
+
+        // case-sensitive layer is independent (no cross-layer dedup).
+        assert_eq!(d.add_entry("Gondor", true), AddOutcome::Added);
+        assert_eq!(d.add_entry("Gondor", true), AddOutcome::Duplicate);
+        // CI and CS don't shadow each other: adding the CS form is still new.
+        let mut d2 = WorkingDict::default();
+        d2.add_ci("gondor");
+        assert_eq!(d2.add_entry("Gondor", true), AddOutcome::Added);
+
+        // phrases.
+        assert_eq!(d.add_entry("quid pro quo", false), AddOutcome::Added);
+        assert_eq!(d.add_entry("quid pro quo", false), AddOutcome::Duplicate);
+        // a multi-word argument that collapses to <2 tokens is ignored.
+        assert_eq!(d.add_entry("   ", false), AddOutcome::Ignored);
     }
 
     #[test]
