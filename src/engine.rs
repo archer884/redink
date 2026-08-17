@@ -60,11 +60,18 @@ impl Engine {
 
     /// True if `word` is acceptable according to any dictionary layer.
     ///
+    /// All-caps alphanumeric tokens (acronyms, model numbers, Roman numerals —
+    /// "NASA", "M16", "XVII", including possessives like "NASA's") are accepted
+    /// outright: they are almost always intentional and rarely spellcheckable.
+    ///
     /// The session and working-dictionary layers also honor possessive-stripping
     /// so that adding a coinage (e.g. "Thorne") also accepts its possessive
     /// ("Thorne's"), since the working dictionary is a plain set outside
     /// spellbook's `'s` affix machinery.
     pub fn check(&self, word: &str) -> bool {
+        if is_all_caps_alnum(word) || strip_possessive(word).is_some_and(is_all_caps_alnum) {
+            return true;
+        }
         if self.user_layer_has(word) {
             return true;
         }
@@ -209,6 +216,21 @@ fn build_custom_dict(ci: &HashSet<String>, cs: &HashSet<String>) -> Dictionary {
     dict
 }
 
+/// True for tokens made entirely of ASCII uppercase letters and digits with at
+/// least one letter ("XVII", "NASA", "M16", "3M"). These are acronyms, model
+/// numbers, or Roman numerals and are skipped by default.
+fn is_all_caps_alnum(word: &str) -> bool {
+    let mut has_letter = false;
+    word.chars().all(|c| {
+        if c.is_ascii_uppercase() {
+            has_letter = true;
+            true
+        } else {
+            c.is_ascii_digit()
+        }
+    }) && has_letter
+}
+
 /// Parse raw `.aff`/`.dic` text into a [`Dictionary`], mapping spellbook's
 /// non-`std::error::Error` parse type into an `anyhow::Error`.
 pub fn load_dictionary(aff: &str, dic: &str) -> anyhow::Result<Dictionary> {
@@ -274,6 +296,19 @@ mod tests {
         assert!(e.check("else"));
         assert!(e.check("else's"), "local patch else->else/M missing?");
         assert!(e.check("anyone else's".split(' ').nth(1).unwrap()));
+    }
+
+    #[test]
+    fn all_caps_alnum_accepted() {
+        let sys = crate::sysdict::resolve_embedded();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
+        for w in ["XVII", "NASA", "M16", "3M", "R2D2", "NASA's", "NASA\u{2019}S"] {
+            assert!(e.check(w), "{w} should be skipped as all-caps alnum");
+        }
+        // Mixed case and lowercase still go through the dictionaries.
+        assert!(!e.check("Ml6"));
+        assert!(!e.check("nasaa"));
     }
 
     #[test]

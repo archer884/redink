@@ -261,6 +261,15 @@ mod tests {
     }
 
     #[test]
+    fn roman_numerals_and_acronyms_skipped() {
+        let m = check_str("Chapter XIV bore MK17 rifles and XVII flags.");
+        assert!(
+            !m.iter().any(|w| w.chars().all(|c| c.is_ascii_uppercase())),
+            "all-caps token flagged: {m:?}"
+        );
+    }
+
+    #[test]
     fn latin_phrases_accepted() {
         let m = check_str("A de facto rule; in vitro; ad hoc; ipso facto; bona fide.");
         // none of the Latin fragment words should be flagged
