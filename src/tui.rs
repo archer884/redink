@@ -13,15 +13,15 @@ use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListState, Paragraph, Wrap},
-    Frame, Terminal,
 };
 
 use crate::check::Misspelling;
@@ -571,8 +571,8 @@ impl App {
         let word_end = entry.current_offset + entry.word_len;
 
         let cols = width.max(20).saturating_sub(2); // leave room for borders
-                                                    // ~1.5 wrapped rows on each side of the word keeps it near the vertical
-                                                    // center of the pane yet visible without scrolling.
+        // ~1.5 wrapped rows on each side of the word keeps it near the vertical
+        // center of the pane yet visible without scrolling.
         let half = cols + cols / 2;
 
         let mut before_start = word_start.saturating_sub(half);

@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::engine::Engine;
 use crate::format::{self, Format};
-use crate::token::{tokenize, Token};
+use crate::token::{Token, tokenize};
 
 /// A single misspelled-word occurrence in a file.
 #[derive(Debug, Clone)]
@@ -226,13 +226,11 @@ mod tests {
 
     fn check_str(src: &str) -> Vec<String> {
         // Write to a temp file and run a real check with the bundled engine.
-        let dir = std::env::temp_dir().join(format!(
-            "redink-check-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
+        // A process-unique atomic counter avoids collisions between parallel
+        // tests (subsec_nanos alone can repeat under load).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("redink-check-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("x.md");
         std::fs::write(&path, src).unwrap();
@@ -267,6 +265,17 @@ mod tests {
             !m.iter().any(|w| w.chars().all(|c| c.is_ascii_uppercase())),
             "all-caps token flagged: {m:?}"
         );
+    }
+
+    /// Scene-label fractions like "2/1's" tokenize to numeric possessives
+    /// ("1's"), and lone foreign letters ("Θ") are notation — neither is a
+    /// misspelling.
+    #[test]
+    fn numeric_possessives_and_single_letters_not_flagged() {
+        let m = check_str("The relocation 2/1's pacing; 2/5's architecture; the rune Θ held.");
+        assert!(!m.contains(&"1's".to_string()), "1's flagged: {m:?}");
+        assert!(!m.contains(&"5's".to_string()), "5's flagged: {m:?}");
+        assert!(!m.contains(&"Θ".to_string()), "Θ flagged: {m:?}");
     }
 
     #[test]

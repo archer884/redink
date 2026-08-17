@@ -80,6 +80,9 @@ SCOWL) is read-only — never modify `assets/dict/`.
 - **All-caps alphanumeric tokens are skipped.** Acronyms, model numbers, and
   Roman numerals (`NASA`, `M16`, `XVII`, including possessives like `NASA's`)
   are never flagged — don't add them to the working dict.
+- **Numbers and numeric possessives are skipped.** Pure digits are never
+  flagged, including possessives like `1's` (from scene labels like `2/1's`).
+  Lone non-ASCII letters used as notation (`Θ`) are also never flagged.
 - **Markdown is parsed.** Code blocks, inline code, URLs, YAML frontmatter,
   and HTML comments are skipped automatically — do not "fix" anything inside
   them.

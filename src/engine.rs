@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use spellbook::Dictionary;
 
-use crate::dict::{canonical, strip_possessive, WorkingDict};
+use crate::dict::{WorkingDict, canonical, strip_possessive};
 
 /// Minimum character length for a suggestion to be shown. Shorter ones are
 /// almost always noise (e.g. "e", "s", "es").
@@ -63,19 +63,26 @@ impl Engine {
     /// All-caps alphanumeric tokens (acronyms, model numbers, Roman numerals —
     /// "NASA", "M16", "XVII", including possessives like "NASA's") are accepted
     /// outright: they are almost always intentional and rarely spellcheckable.
+    /// So are possessives of numbers ("1's", as tokenized from scene labels
+    /// like "2/1's") and single non-ASCII letters ("Θ"), which are notation,
+    /// not prose.
     ///
     /// The session and working-dictionary layers also honor possessive-stripping
     /// so that adding a coinage (e.g. "Thorne") also accepts its possessive
     /// ("Thorne's"), since the working dictionary is a plain set outside
     /// spellbook's `'s` affix machinery.
     pub fn check(&self, word: &str) -> bool {
-        if is_all_caps_alnum(word) || strip_possessive(word).is_some_and(is_all_caps_alnum) {
+        let stem = strip_possessive(word);
+        if is_all_caps_alnum(word) || stem.is_some_and(is_all_caps_alnum) {
             return true;
         }
-        if self.user_layer_has(word) {
+        if stem.is_some_and(|s| !s.chars().any(|c| c.is_alphabetic())) {
             return true;
         }
-        if strip_possessive(word).is_some_and(|s| self.user_layer_has(s)) {
+        if is_non_ascii_single_letter(word) || stem.is_some_and(is_non_ascii_single_letter) {
+            return true;
+        }
+        if self.user_layer_has(word) || stem.is_some_and(|s| self.user_layer_has(s)) {
             return true;
         }
         self.dict.check(word)
@@ -231,6 +238,13 @@ fn is_all_caps_alnum(word: &str) -> bool {
     }) && has_letter
 }
 
+/// True for a single non-ASCII letter ("Θ", "é", "ß"). Isolated foreign
+/// alphabet characters are names or notation, not misspellings.
+fn is_non_ascii_single_letter(word: &str) -> bool {
+    let mut chars = word.chars();
+    matches!(chars.next(), Some(c) if c.is_alphabetic() && !c.is_ascii()) && chars.next().is_none()
+}
+
 /// Parse raw `.aff`/`.dic` text into a [`Dictionary`], mapping spellbook's
 /// non-`std::error::Error` parse type into an `anyhow::Error`.
 pub fn load_dictionary(aff: &str, dic: &str) -> anyhow::Result<Dictionary> {
@@ -303,12 +317,50 @@ mod tests {
         let sys = crate::sysdict::resolve_embedded();
         let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
         let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
-        for w in ["XVII", "NASA", "M16", "3M", "R2D2", "NASA's", "NASA\u{2019}S"] {
+        for w in [
+            "XVII",
+            "NASA",
+            "M16",
+            "3M",
+            "R2D2",
+            "NASA's",
+            "NASA\u{2019}S",
+        ] {
             assert!(e.check(w), "{w} should be skipped as all-caps alnum");
         }
         // Mixed case and lowercase still go through the dictionaries.
         assert!(!e.check("Ml6"));
         assert!(!e.check("nasaa"));
+    }
+
+    /// Numeric possessives ("1's" as tokenized from "2/1's") can't be
+    /// misspellings; letter-bearing stems are still checked.
+    #[test]
+    fn numeric_possessives_accepted() {
+        let sys = crate::sysdict::resolve_embedded();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
+        for w in ["0's", "1's", "5's", "42's", "42\u{2019}s"] {
+            assert!(e.check(w), "{w} should be skipped as a numeric possessive");
+        }
+        assert!(!e.check("1x's"));
+    }
+
+    /// Single non-ASCII letters ("Θ") are notation, not typos. Multi-character
+    /// non-ASCII words and ASCII single letters still go through the dictionary.
+    #[test]
+    fn non_ascii_single_letters_accepted() {
+        let sys = crate::sysdict::resolve_embedded();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
+        for w in ["Θ", "é", "Æ", "Ω"] {
+            assert!(
+                e.check(w),
+                "{w} should be skipped as a single non-ASCII letter"
+            );
+        }
+        assert!(!e.check("ΘΘ"));
+        assert!(e.check("a"), "'a' is a real word");
     }
 
     #[test]
