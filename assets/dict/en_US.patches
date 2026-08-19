@@ -1,0 +1,17 @@
+# Local patches for the vendored SCOWL en_US dictionary, applied at build
+# time by build.rs. The vendored en_US.dic stays pristine so re-vendoring is
+# a drop-in file swap.
+#
+# Format: one exact-line replacement per record, `old -> new`. A record whose
+# left-hand line is missing from the dictionary fails the build — upstream
+# changed or already ships the fix; update this manifest. Additions and
+# deletions are not supported (they would invalidate the entry count in the
+# .dic header): new words belong in the working dictionary (.redink.dic).
+
+# "else" lacked the possessive (M) flag, so valid forms like "anyone else's"
+# were flagged. Peers: someone/MS, anyone/M, today/M.
+else -> else/M
+
+# Same class of gap: "saddler's" was flagged — and, absurdly, suggested as
+# its own correction. S (plural) preserved. Peers: tanner/SM, baker/M.
+saddler/S -> saddler/SM

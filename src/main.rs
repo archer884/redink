@@ -7,6 +7,10 @@ use clap::Parser;
 
 mod check;
 mod cli;
+// Shared with `build.rs` (via `#[path]`); test-only here — `cargo test`
+// doesn't run build-script tests, so the patcher's unit tests live here.
+#[cfg(test)]
+mod dictpatch;
 mod dict;
 mod engine;
 mod format;

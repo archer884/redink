@@ -350,10 +350,17 @@ Wordlist Command: mk-list --accents=strip en_US 60
 Local modifications (redink)
 ============================
 
-The vendored en_US.dic differs from upstream SCOWL 2020.12.07 by the
-following local patch. Re-apply if re-vendoring.
+The vendored en_US.dic is kept byte-identical to upstream SCOWL 2020.12.07.
+Local fixes are recorded in en_US.patches as exact-line replacements and
+applied at build time by build.rs, rather than edited into the dictionary:
 
-  en_US.dic line for "else": changed `else` -> `else/M`
+  else -> else/M
     Reason: "else" lacked the possessive (M) flag, so valid forms like
     "anyone else's" were flagged as misspelled. "else/M" makes "else's"
     recognized, consistent with peers (someone/MS, anyone/M, today/M).
+
+  saddler/S -> saddler/SM
+    Reason: "saddler" lacked the possessive (M) flag, so "saddler's" was
+    flagged as misspelled — and, absurdly, offered as its own correction.
+    The S (plural) flag is preserved; consistent with peers (tanner/SM,
+    baker/M).

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use spellbook::Dictionary;
 
-use crate::dict::{WorkingDict, canonical, strip_possessive};
+use crate::dict::{canonical, strip_possessive, WorkingDict};
 
 /// Minimum character length for a suggestion to be shown. Shorter ones are
 /// almost always noise (e.g. "e", "s", "es").
@@ -300,8 +300,8 @@ mod tests {
         assert!(e.check("Atrax's"));
     }
 
-    /// Regression guard for the local dict patch (en_US.dic: `else` -> `else/M`).
-    /// Catches a re-vendor that drops the patch.
+    /// Regression guard for the local dict patch (en_US.patches:
+    /// `else -> else/M`). Catches a re-vendor that drops the patch.
     #[test]
     fn vendored_dict_accepts_else_possessive() {
         let sys = crate::sysdict::resolve_embedded();
@@ -310,6 +310,18 @@ mod tests {
         assert!(e.check("else"));
         assert!(e.check("else's"), "local patch else->else/M missing?");
         assert!(e.check("anyone else's".split(' ').nth(1).unwrap()));
+    }
+
+    /// Regression guard for the local dict patch (en_US.patches:
+    /// `saddler/S -> saddler/SM`). Catches a re-vendor that drops the patch.
+    #[test]
+    fn vendored_dict_accepts_saddler_possessive() {
+        let sys = crate::sysdict::resolve_embedded();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let e = Engine::new(dict, WorkingDict::default(), PathBuf::from("/dev/null"));
+        assert!(e.check("saddler"));
+        assert!(e.check("saddler's"), "patch saddler/S->saddler/SM missing?");
+        assert!(e.check("saddlers"), "plural (S flag) lost in patching?");
     }
 
     #[test]

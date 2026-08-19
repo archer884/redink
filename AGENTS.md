@@ -111,7 +111,12 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
-Both must pass clean. The vendored dictionary is SCOWL `en_US` 2020.12.07 with
-one local patch (`else` → `else/M`, so `else's` is recognized); a regression
-test (`vendored_dict_accepts_else_possessive`) guards it — re-apply the patch
-if you ever re-vendor. See `assets/dict/en_US-COPYRIGHT`.
+Both must pass clean. The vendored dictionary is SCOWL `en_US` 2020.12.07,
+kept pristine in `assets/dict/`. Local fixes are exact-line replacements in
+`assets/dict/en_US.patches` (`old -> new`, e.g. `else -> else/M`,
+`saddler/S -> saddler/SM`), applied at build time by `build.rs` — never edit
+the vendored `.dic` directly. Re-vendoring is a drop-in file swap; a stale
+patch (anchor line gone) fails the build. Regression tests
+(`vendored_dict_accepts_else_possessive`,
+`vendored_dict_accepts_saddler_possessive`) guard the current patches. See
+`assets/dict/en_US-COPYRIGHT`.

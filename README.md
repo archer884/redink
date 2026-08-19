@@ -122,5 +122,5 @@ highlighted, with numbered suggestions.
 The bundled English dictionary is derived from [SCOWL](https://wordlist.sourceforge.net/)
 © 2000–2026 Kevin Atkinson and others (permissive; see
 `assets/dict/en_US-COPYRIGHT`), with the affix file from Geoff Kuenning's
-ispell (BSD). One local patch is applied to the vendored copy (`else` →
-`else/M`, so `else's` is recognized); see "Local modifications" in that file.
+ispell (BSD). Local fixes are kept as a build-time patch manifest
+(`assets/dict/en_US.patches`); see "Local modifications" in that file.
