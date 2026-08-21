@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use spellbook::Dictionary;
 
-use crate::dict::{WorkingDict, canonical, strip_possessive};
+use crate::dict::{canonical, strip_possessive, WorkingDict};
 
 /// Minimum character length for a suggestion to be shown. Shorter ones are
 /// almost always noise (e.g. "e", "s", "es").
@@ -380,7 +380,9 @@ mod tests {
         assert!(loaded.ci.contains("hobbit"));
         assert!(loaded.phrases.contains("tzeya gan"));
         assert!(loaded.phrases.contains("per se"));
-        assert!(loaded.phrases_cs.contains("Tzeya Gan"));
+        // "=Tzeya Gan" is shadowed by the CI phrase "tzeya gan", so save
+        // prunes it from the file (the in-memory CS layer above is unaffected).
+        assert!(!loaded.phrases_cs.contains("Tzeya Gan"));
         let _ = std::fs::remove_file(&path);
     }
 

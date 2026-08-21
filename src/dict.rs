@@ -293,7 +293,9 @@ pub fn load(path: &Path) -> anyhow::Result<WorkingDict> {
     Ok(dict)
 }
 
-/// Persist the working dictionary, sorted for clean diffs.
+/// Persist the working dictionary, sorted for clean diffs. Exact-case
+/// entries shadowed by a case-insensitive one (`foo` also covers `=Foo`)
+/// are pruned, as are exact-case phrases shadowed by a CI phrase.
 pub fn save(path: &Path, dict: &WorkingDict) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -301,11 +303,19 @@ pub fn save(path: &Path, dict: &WorkingDict) -> anyhow::Result<()> {
 
     let mut ci: Vec<&String> = dict.ci.iter().collect();
     ci.sort();
-    let mut cs: Vec<&String> = dict.cs.iter().collect();
+    let mut cs: Vec<&String> = dict
+        .cs
+        .iter()
+        .filter(|w| !dict.ci.contains(&w.to_lowercase()))
+        .collect();
     cs.sort();
     let mut ph: Vec<&String> = dict.phrases.iter().collect();
     ph.sort();
-    let mut phcs: Vec<&String> = dict.phrases_cs.iter().collect();
+    let mut phcs: Vec<&String> = dict
+        .phrases_cs
+        .iter()
+        .filter(|w| !dict.phrases.contains(&w.to_lowercase()))
+        .collect();
     phcs.sort();
 
     let mut out = String::new();
@@ -484,6 +494,39 @@ mod tests {
         assert!(d.phrases.is_empty());
         // an unknown phrase removes nothing.
         assert!(!d.remove("per se"));
+    }
+
+    #[test]
+    fn save_prunes_cs_shadowed_by_ci() {
+        let p = scratch("prune.dic");
+        let mut d = WorkingDict::default();
+        d.add_ci("foo");
+        d.add_cs("Foo"); // shadowed by CI "foo"
+        d.add_cs("Gondor"); // independent, must survive
+        save(&p, &d).unwrap();
+
+        let loaded = load(&p).unwrap();
+        assert!(loaded.ci.contains("foo"));
+        assert!(!loaded.cs.contains("Foo"), "=Foo is redundant next to foo");
+        assert!(loaded.cs.contains("Gondor"));
+    }
+
+    #[test]
+    fn save_prunes_phrase_cs_shadowed_by_phrase() {
+        let p = scratch("prune-phrase.dic");
+        let mut d = WorkingDict::default();
+        d.phrases.insert("tzeya gan".to_string());
+        d.phrases_cs.insert("Tzeya Gan".to_string()); // shadowed
+        d.phrases_cs.insert("Tzeya Gam".to_string()); // independent
+        save(&p, &d).unwrap();
+
+        let loaded = load(&p).unwrap();
+        assert!(loaded.phrases.contains("tzeya gan"));
+        assert!(
+            !loaded.phrases_cs.contains("Tzeya Gan"),
+            "=Tzeya Gan is redundant next to tzeya gan"
+        );
+        assert!(loaded.phrases_cs.contains("Tzeya Gam"));
     }
 
     #[test]
