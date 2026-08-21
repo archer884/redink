@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
+use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
 
 mod check;
@@ -162,10 +163,9 @@ fn check_all(
     // Step 2: If suggestions are needed, gather unique misspelled words,
     // compute their suggestions in parallel, and attach them.
     if needs_suggestions && !miss.is_empty() {
-        let unique_words: std::collections::HashSet<String> =
-            miss.iter().map(|m| m.word.clone()).collect();
+        let unique_words: HashSet<String> = miss.iter().map(|m| m.word.clone()).collect();
 
-        let suggest_cache: std::collections::HashMap<String, Vec<String>> = unique_words
+        let suggest_cache: HashMap<String, Vec<String>> = unique_words
             .into_par_iter()
             .map(|word| {
                 let sugs = engine

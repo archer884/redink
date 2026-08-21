@@ -17,8 +17,9 @@
 //! ```
 //! Lines starting with `#` are comments; blank lines are ignored.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+use hashbrown::{HashMap, HashSet};
 
 const DEFAULT_NAME: &str = ".redink.dic";
 const HEADER: &[&str] = &[
@@ -134,9 +135,7 @@ impl PhraseBigrams {
         for phrase in phrases {
             for bg in phrase_bigrams(phrase) {
                 let (first, second) = bg.split_once(' ').expect("bigram is two words");
-                map.entry(first.to_string())
-                    .or_default()
-                    .insert(second.to_string());
+                map.entry_ref(first).or_default().insert(second.to_string());
             }
         }
         Self { map }

@@ -7,7 +7,6 @@
 //! `h`/`H` add compound · `p` add word/phrase prompt (`=` toggles exact case)
 //! · `s` save · `q` save+quit · `Q` discard+quit · `?` help
 
-use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 
 use anyhow::Result;
@@ -19,6 +18,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use hashbrown::{HashMap, HashSet};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -358,6 +358,7 @@ impl App {
         let stem = crate::dict::canonical(&norm);
         let layer = if sensitive { "exact case" } else { "any case" };
         self.engine.add_phrase(text, sensitive);
+        self.invalidate_suggestions();
         self.persist_working();
         self.retain_unresolved();
         self.message = Some(format!(
@@ -469,6 +470,7 @@ impl App {
         } else {
             self.engine.add_ci(&token);
         }
+        self.invalidate_suggestions();
         self.persist_working();
         self.retain_unresolved();
         let layer = if sensitive { "exact case" } else { "any case" };
@@ -574,13 +576,25 @@ impl App {
         }
     }
 
+    /// Drop every memoized suggestion after a working-dictionary addition.
+    /// The new entry can appear in — and, since custom words are merged on
+    /// merit rather than pinned, reorder or push out of — any other word's
+    /// list, so the shared cache and the per-entry copies both have to go.
+    /// Recomputation stays lazy: only the focused word pays, on next draw.
+    fn invalidate_suggestions(&mut self) {
+        self.suggest_cache.clear();
+        for e in &mut self.entries {
+            e.suggestions = None;
+        }
+    }
+
     fn ensure_suggestions_for_current(&mut self) {
         if let Some(entry) = self.entries.get_mut(self.cursor)
             && entry.suggestions.is_none()
         {
             let sugs = self
                 .suggest_cache
-                .entry(entry.word.clone())
+                .entry_ref(entry.word.as_str())
                 .or_insert_with(|| {
                     // One focused word at a time: the extra ~1ms of ngram
                     // search is invisible here and buys the best answer for a
@@ -1007,6 +1021,38 @@ mod tests {
             "sibling compound went stale"
         );
         assert_eq!(app.files[&path].text, "teh-the rode forth\n");
+    }
+
+    /// Regression: a working-dictionary addition has to drop memoized
+    /// suggestions. Before the fix, an entry whose list was computed before
+    /// the add kept it, and the new coinage never showed up in the numbered
+    /// suggestions for a near-miss typo of it.
+    #[test]
+    fn adding_a_word_refreshes_cached_suggestions() {
+        let s = testutil::scratch("tui-suggest-stale");
+        let path = s.path("g.md");
+        std::fs::write(&path, "gondr\n").unwrap();
+
+        let engine = test_engine(s.path("work.dic"));
+        let miss = crate::check::check_file(&path, Format::Auto, &engine).unwrap();
+        assert_eq!(miss.len(), 1, "expected one flagged word: {miss:?}");
+        let mut app = App::new(miss, engine, Format::Auto).unwrap();
+
+        let gondor = "Gondor".to_string();
+        app.ensure_suggestions_for_current();
+        assert!(
+            !app.entries[0].suggestions.as_ref().unwrap().contains(&gondor),
+            "test premise: Gondor is not a system-dictionary suggestion"
+        );
+
+        app.commit_add("Gondor", true);
+        assert_eq!(app.entries.len(), 1, "gondr is still misspelled");
+        app.ensure_suggestions_for_current();
+        assert!(
+            app.entries[0].suggestions.as_ref().unwrap().contains(&gondor),
+            "stale suggestions survived the add: {:?}",
+            app.entries[0].suggestions
+        );
     }
 
     #[test]

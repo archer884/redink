@@ -10,9 +10,9 @@
 //! The layers are consulted cheapest-first, which is an optimization only:
 //! the answer is their disjunction, so the order carries no meaning.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
+use hashbrown::HashSet;
 use spellbook::Dictionary;
 
 use crate::dict::{PhraseBigrams, WorkingDict, canonical, strip_possessive};

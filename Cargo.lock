@@ -591,6 +591,7 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+ "rayon",
 ]
 
 [[package]]
@@ -1231,11 +1232,12 @@ dependencies = [
 
 [[package]]
 name = "redink"
-version = "0.1.7"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "hashbrown 0.17.1",
  "ignore",
  "pulldown-cmark",
  "ratatui",
