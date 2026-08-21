@@ -4,7 +4,8 @@
 //!
 //! Keys: `j`/`k`/`n`/`N` move · `1`-`9` replace with suggestion · `r` replace
 //! manually · `i` ignore (session) · `a` add lowercase · `A` add exact-case ·
-//! `s` save · `q` save+quit · `Q` discard+quit · `?` help
+//! `h`/`H` add compound · `p` add word/phrase prompt (`=` toggles exact case)
+//! · `s` save · `q` save+quit · `Q` discard+quit · `?` help
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
@@ -24,8 +25,11 @@ use ratatui::{
     widgets::{Block, Borders, List, ListState, Paragraph, Wrap},
 };
 
+use crate::check;
 use crate::check::Misspelling;
 use crate::engine::Engine;
+use crate::format::{self, Format};
+use crate::token::{Token, tokenize};
 
 type Backend = CrosstermBackend<Stdout>;
 
@@ -61,6 +65,12 @@ enum Mode {
     Normal,
     /// Manual replacement buffer.
     Replace(String),
+    /// Add word/phrase prompt buffer. `sensitive` (shown as an `=` prefix)
+    /// registers the entry for exact casing only.
+    Add {
+        buf: String,
+        sensitive: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -109,6 +119,13 @@ fn compute_line_starts(text: &str) -> Vec<usize> {
         }
     }
     starts
+}
+
+/// Tokenize file text exactly as the check pipeline does (Markdown-aware
+/// skips included), for phrase-context re-checks after dictionary changes.
+fn file_tokens(text: &str, path: &std::path::Path) -> Vec<Token> {
+    let skip = format::skip_ranges(text, Format::Auto.resolve(path));
+    tokenize(text, &skip)
 }
 
 /// Collapse every run of whitespace (including newlines) into a single space,
@@ -203,6 +220,10 @@ impl App {
             self.show_help = false;
             return;
         }
+        if matches!(self.mode, Mode::Add { .. }) {
+            self.handle_add_key(key);
+            return;
+        }
         if matches!(self.mode, Mode::Replace(_)) {
             self.handle_replace_key(key);
             return;
@@ -227,6 +248,14 @@ impl App {
             KeyCode::Char('A') => self.add_cs(),
             KeyCode::Char('h') => self.add_compound_ci(),
             KeyCode::Char('H') => self.add_compound_cs(),
+            KeyCode::Char('p') => {
+                if let Some(w) = self.cur_word() {
+                    self.mode = Mode::Add {
+                        buf: w.to_string(),
+                        sensitive: false,
+                    };
+                }
+            }
             KeyCode::Char('r') => {
                 if let Some(w) = self.cur_word() {
                     self.mode = Mode::Replace(w.to_string());
@@ -268,6 +297,53 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_add_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => {
+                let (buf, sensitive) = match &self.mode {
+                    Mode::Add { buf, sensitive } => (buf.clone(), *sensitive),
+                    _ => unreachable!(),
+                };
+                self.mode = Mode::Normal;
+                if !buf.trim().is_empty() {
+                    self.commit_add(&buf, sensitive);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Mode::Add { buf, .. } = &mut self.mode {
+                    buf.pop();
+                }
+            }
+            KeyCode::Char('=') => {
+                // Toggle exact-case instead of inserting a literal `=`.
+                if let Mode::Add { sensitive, .. } = &mut self.mode {
+                    *sensitive = !*sensitive;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Mode::Add { buf, .. } = &mut self.mode {
+                    buf.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Register the prompt text on the appropriate layer and refresh entries.
+    fn commit_add(&mut self, text: &str, sensitive: bool) {
+        let norm: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let stem = crate::dict::canonical(&norm);
+        let layer = if sensitive { "exact case" } else { "any case" };
+        self.engine.add_phrase(text, sensitive);
+        self.persist_working("add");
+        self.retain_unresolved();
+        self.message = Some(format!(
+            "added \u{201c}{stem}\u{201d} ({layer}) to {}",
+            self.engine.working_path().display()
+        ));
     }
 
     fn cursor_next(&mut self) {
@@ -407,17 +483,60 @@ impl App {
     /// Drop entries now accepted by any dictionary layer. An entry is removed
     /// if either its part word is accepted OR the compound it belongs to (as a
     /// whole) is accepted — so adding `Tzeya-Gan` clears both the `Tzeya` and
-    /// `Gan` parts.
+    /// `Gan` parts — or if it has become phrase-covered in context (adding
+    /// `per se` clears a flagged `se` that stands inside the phrase).
     fn retain_unresolved(&mut self) {
-        let engine = &self.engine;
-        self.entries.retain(|e| {
-            let part_ok = engine.check(&e.word);
-            let compound_ok = e.compound.as_ref().is_some_and(|c| engine.check(c));
-            !part_ok && !compound_ok
+        let mut token_cache: HashMap<std::path::PathBuf, Option<Vec<Token>>> = HashMap::new();
+        let mut keep: Vec<bool> = Vec::with_capacity(self.entries.len());
+        for e in &self.entries {
+            let part_ok = self.engine.check(&e.word);
+            let compound_ok = e.compound.as_ref().is_some_and(|c| self.engine.check(c));
+            keep.push(!(part_ok || compound_ok) && !self.entry_phrase_covered(e, &mut token_cache));
+        }
+        let mut i = 0;
+        self.entries.retain(|_| {
+            let k = keep[i];
+            i += 1;
+            k
         });
         if self.cursor >= self.entries.len() {
             self.cursor = self.entries.len().saturating_sub(1);
         }
+    }
+
+    /// True if the entry's token forms a known phrase bigram with a neighbour
+    /// in the file — the same context check `check::phrase_covered` ran at
+    /// scan time, redone now that the phrase layers may have changed.
+    fn entry_phrase_covered(
+        &self,
+        entry: &Entry,
+        cache: &mut HashMap<std::path::PathBuf, Option<Vec<Token>>>,
+    ) -> bool {
+        if !cache.contains_key(&entry.path) {
+            let toks = self
+                .files
+                .get(&entry.path)
+                .map(|buf| file_tokens(&buf.text, &entry.path));
+            cache.insert(entry.path.clone(), toks);
+        }
+        let Some(tokens) = cache.get(&entry.path).and_then(|t| t.as_ref()) else {
+            return false;
+        };
+        // The entry offset may point inside a compound token (it is a part
+        // start), and offsets shift after replacements — find the token whose
+        // span contains the current word span.
+        let word_end = entry.current_offset + entry.word_len;
+        let Some(i) = tokens.iter().position(|t| {
+            t.byte_range.start <= entry.current_offset && word_end <= t.byte_range.end
+        }) else {
+            return false;
+        };
+        check::phrase_covered(
+            i,
+            tokens,
+            self.engine.phrase_bigrams(),
+            self.engine.phrase_bigrams_cs(),
+        )
     }
 
     fn save_all(&mut self) -> usize {
@@ -623,6 +742,15 @@ impl App {
         if let Mode::Replace(buf) = &self.mode {
             return vec![Line::from(format!("replace with: {}_", buf))];
         }
+        if let Mode::Add { buf, sensitive } = &self.mode {
+            // The `=` prefix mirrors the working-dict file format and shows
+            // the exact-case state without cursor movement.
+            let eq = if *sensitive { "=" } else { "" };
+            return vec![
+                Line::from(format!("add: {eq}{buf}_")),
+                Line::from("Enter add \u{00b7} Esc cancel \u{00b7} = exact case"),
+            ];
+        }
         let Some(entry) = self.entries.get(self.cursor) else {
             return vec![Line::from("(nothing selected)")];
         };
@@ -647,7 +775,7 @@ impl App {
     }
 
     fn draw_footer(&self, f: &mut Frame<'_>, area: Rect) {
-        let hint = "j/k move \u{00b7} 1-9 replace \u{00b7} r replace \u{00b7} i ignore \u{00b7} a/A add word \u{00b7} h/H add compound \u{00b7} s save \u{00b7} q quit \u{00b7} ? help";
+        let hint = "j/k move \u{00b7} 1-9 replace \u{00b7} r replace \u{00b7} i ignore \u{00b7} a/A add word \u{00b7} h/H add compound \u{00b7} p add word/phrase \u{00b7} s save \u{00b7} q quit \u{00b7} ? help";
         let dirty = if self.dirty.is_empty() {
             String::new()
         } else {
@@ -677,6 +805,7 @@ impl App {
             Line::from("  A           add word, exact-case (case-sensitive)"),
             Line::from("  h           add whole compound (case-insensitive)"),
             Line::from("  H           add whole compound (exact case)"),
+            Line::from("  p           add word or phrase (prompt; = exact case)"),
             Line::from("  s           save all edited files now"),
             Line::from("  q           save and quit"),
             Line::from("  Q           discard edits and quit"),

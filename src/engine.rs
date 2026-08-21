@@ -34,15 +34,8 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(dict: Dictionary, working: WorkingDict, working_path: PathBuf) -> Self {
-        let phrase_bigrams = crate::dict::build_phrase_bigrams(&working.phrases);
         let custom_dict = build_custom_dict(&working.ci, &working.cs);
-        let mut phrase_bigrams_cs = HashSet::new();
-        for p in &working.phrases_cs {
-            for bg in crate::dict::phrase_bigrams(p) {
-                phrase_bigrams_cs.insert(bg);
-            }
-        }
-        Self {
+        let mut this = Self {
             dict,
             custom_dict,
             working_path,
@@ -51,9 +44,11 @@ impl Engine {
             working_phrases: working.phrases,
             working_phrases_cs: working.phrases_cs,
             session_ignore: HashSet::new(),
-            phrase_bigrams,
-            phrase_bigrams_cs,
-        }
+            phrase_bigrams: HashSet::new(),
+            phrase_bigrams_cs: HashSet::new(),
+        };
+        this.rebuild_phrase_bigrams();
+        this
     }
 
     pub fn working_path(&self) -> &PathBuf {
@@ -194,6 +189,46 @@ impl Engine {
         let _ = self.custom_dict.add(&word);
     }
 
+    /// Add a word or phrase (`p` in the TUI). A single word routes to
+    /// [`add_ci`](Self::add_ci)/[`add_cs`](Self::add_cs); a multi-word entry
+    /// becomes a phrase on the ci or cs phrase layer (bigram-matched against
+    /// neighbours, exactly like the bundled Latin phrases). Phrase bigram
+    /// sets are rebuilt so the change takes effect immediately. Persists on
+    /// save.
+    pub fn add_phrase(&mut self, text: &str, sensitive: bool) {
+        let norm: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if norm.is_empty() {
+            return;
+        }
+        if norm.chars().any(char::is_whitespace) {
+            let added = if sensitive {
+                self.working_phrases_cs.insert(norm.clone())
+            } else {
+                self.working_phrases.insert(norm.to_lowercase())
+            };
+            if added {
+                self.rebuild_phrase_bigrams();
+            }
+        } else if sensitive {
+            self.add_cs(&norm);
+        } else {
+            self.add_ci(&norm);
+        }
+    }
+
+    /// Rebuild the merged ci phrase-bigram set and the cs phrase-bigram set
+    /// from the working phrase layers.
+    fn rebuild_phrase_bigrams(&mut self) {
+        self.phrase_bigrams = crate::dict::build_phrase_bigrams(&self.working_phrases);
+        let mut cs = HashSet::new();
+        for p in &self.working_phrases_cs {
+            for bg in crate::dict::phrase_bigrams(p) {
+                cs.insert(bg);
+            }
+        }
+        self.phrase_bigrams_cs = cs;
+    }
+
     /// Remove an entry (matches either layer; possessive-insensitive).
     /// Persists on save.
     #[allow(dead_code)]
@@ -304,6 +339,49 @@ mod tests {
         assert!(e.check("Atrax"));
         assert!(e.check("Atrax's"));
         assert!(e.check("atrax"));
+    }
+
+    /// `p` in the TUI: single words route to the word layers, phrases land on
+    /// the phrase layers with bigrams rebuilt immediately, and everything
+    /// round-trips through save_working.
+    #[test]
+    fn add_phrase_layers_and_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("redink-addphrase-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.dic");
+        let _ = std::fs::remove_file(&path);
+
+        let sys = crate::sysdict::resolve_embedded();
+        let dict = load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let mut e = Engine::new(dict, WorkingDict::default(), path.clone());
+
+        // Single word: behaves like add_ci (and is checked immediately).
+        e.add_phrase("hobbit", false);
+        assert!(e.check("Hobbit"));
+
+        // Phrases: bigrams live, on the right layer.
+        e.add_phrase("tzeya gan", false);
+        assert!(
+            e.phrase_bigrams().contains("tzeya gan"),
+            "ci bigram missing after add_phrase"
+        );
+        e.add_phrase("Tzeya Gan", true);
+        assert!(
+            e.phrase_bigrams_cs().contains("Tzeya Gan"),
+            "cs bigram missing after add_phrase"
+        );
+
+        // Whitespace is normalized: extra spaces still yield one clean entry.
+        e.add_phrase("per   se", false);
+        assert!(e.phrase_bigrams().contains("per se"));
+
+        e.save_working().unwrap();
+        let loaded = crate::dict::load(&path).unwrap();
+        assert!(loaded.ci.contains("hobbit"));
+        assert!(loaded.phrases.contains("tzeya gan"));
+        assert!(loaded.phrases.contains("per se"));
+        assert!(loaded.phrases_cs.contains("Tzeya Gan"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

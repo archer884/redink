@@ -100,7 +100,7 @@ pub fn check_file(
 /// True if `tokens[i]` forms a known phrase bigram with either neighbour.
 /// Regular phrases match case-insensitively; exact-case phrases (`=Tzeya
 /// Gan`) require the neighbouring words to match as written.
-fn phrase_covered(
+pub(crate) fn phrase_covered(
     i: usize,
     tokens: &[Token],
     phrases: &HashSet<String>,
