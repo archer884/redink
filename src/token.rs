@@ -61,7 +61,11 @@ pub fn tokenize_with_lowercase(src: &str, skip: &[Range<usize>]) -> Tokenized {
     let tokens = tokenize(src, skip);
     let lowercase = tokens.iter().map(|t| t.word.to_lowercase()).collect();
     let mut gap_clean = Vec::with_capacity(tokens.len());
-    gap_clean.push(false);
+    // One flag per token, so the arrays stay index-aligned; the first token
+    // has no predecessor to be adjacent to.
+    if !tokens.is_empty() {
+        gap_clean.push(false);
+    }
     for pair in tokens.windows(2) {
         let clean = gap_is_clean(&src[pair[0].byte_range.end..pair[1].byte_range.start]);
         gap_clean.push(clean);
@@ -146,7 +150,9 @@ mod tests {
     #[test]
     fn skips_ranges() {
         let src = "keep `drop1` keep drop2";
-        let skip = vec![6..13]; // covers `drop1`
+        // Spelled out rather than `vec![6..13]`, which clippy reads as a
+        // botched attempt to collect a range.
+        let skip = vec![Range { start: 6, end: 13 }]; // covers `drop1`
         let t = tokenize(src, &skip);
         let words: Vec<&str> = t.iter().map(|x| x.word.as_str()).collect();
         assert_eq!(words, vec!["keep", "keep", "drop2"]);

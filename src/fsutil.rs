@@ -2,6 +2,11 @@
 //! rename over the target. A crash mid-write can never leave a truncated
 //! manuscript or dictionary behind — the old content stays in place until
 //! the new content is fully on disk.
+//!
+//! The temp file is created fresh, so it would otherwise be born with the
+//! process umask rather than the target's mode; [`write_atomic`] copies the
+//! target's permissions across before the rename so that replacing a file
+//! never quietly widens who can read it.
 
 use std::fs;
 use std::io::Write;
@@ -31,12 +36,17 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Captured before the write: after the rename the original is gone.
+    let mode = fs::metadata(path).ok().map(|m| m.permissions());
     let tmp = temp_path(path);
     let result = (|| -> anyhow::Result<()> {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
+        if let Some(mode) = mode {
+            fs::set_permissions(&tmp, mode)?;
+        }
         fs::rename(&tmp, path)?;
         Ok(())
     })();
@@ -67,6 +77,21 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
+    }
+
+    /// Replacing a file must not widen its permissions: the temp file is new,
+    /// so without an explicit copy it would be born with the process umask.
+    #[cfg(unix)]
+    #[test]
+    fn preserves_permissions_of_replaced_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = testutil::scratch("atomic-mode");
+        let p = s.path("f.md");
+        write_atomic(&p, b"one").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&p, b"two").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "permissions widened on replace");
     }
 
     #[test]

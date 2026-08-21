@@ -45,6 +45,7 @@ cargo build --release
 redink src/chapter.*.md      # TUI over those files (interactive terminal)
 redink                        # TUI over all .md/.txt in the cwd
 redink check                  # non-interactive check (text output)
+redink check chapters/        # check a whole directory tree
 redink check --json ch01.md   # machine-readable, for scripts/agents
 redink check --words          # just the unique misspelled words
 redink dict list              # show the working dictionary
@@ -57,12 +58,18 @@ redink fix ch01.md --at 1234 --word brwon --to brown   # replace at a byte offse
 ```
 
 Global options: `--dict <PATH>`, `--lang <LANG>` (default `en_US`),
-`--sysdict-dir <DIR>`, `--format <auto|md|text>` (default `auto`).
+`--sysdict-dir <DIR>`, `--format <auto|markdown|text>` (default `auto`; `md`
+is accepted as a shorthand for `markdown`).
+
+Paths may be files or directories; a directory is walked for `.md`/`.txt`,
+honoring `.gitignore`. A file named explicitly is checked whatever its
+extension. With no paths at all, redink walks the current directory.
 
 A bare `redink <files>` launches the TUI when stdout is a terminal, otherwise
 runs a non-interactive check.
 
-**Exit codes:** `0` clean · `1` misspellings found · `2` error.
+**Exit codes:** `0` clean · `1` misspellings found · `2` error. A file that
+could not be read counts as an error, so `0` never hides a mistyped path.
 
 ### JSON schema (`check --json`)
 
@@ -97,7 +104,8 @@ token when the misspelling is one part of a compound, otherwise `null`.
 | `A` | add the word, exact case |
 | `h` | add the whole hyphenated compound, case-insensitive |
 | `H` | add the whole hyphenated compound, exact case |
-| `s` | save edited files · `q` save + quit · `Q` discard + quit · `?` help |
+| `p` | add a word or phrase at a prompt (`=` toggles exact case, `Enter`/`Esc`) |
+| `s` | save edited files · `q` save + quit · `Q` / `Ctrl-C` discard + quit · `?` help |
 
 The misspelling is shown in context (a character window centered on the word),
 highlighted, with numbered suggestions.
@@ -119,7 +127,15 @@ highlighted, with numbered suggestions.
   still flagged.
 - **Markdown.** Fenced/inline code, bare URLs, YAML frontmatter, and HTML
   comments/tags are skipped. Override per-file with `--format`.
-- **Suggestions** shorter than 3 characters are dropped as noise.
+- **Suggestions.** System-dictionary candidates arrive in that dictionary's own
+  ranking and keep it. Working-dictionary entries are then merged into the list
+  at the position their closeness to the flagged word earns — Damerau-
+  Levenshtein, so a transposition counts as one slip — rather than being pinned
+  to the front. A coinage that is genuinely the likely intent leads; one that is
+  merely present in the project sinks to where it belongs. Exact ties go to the
+  working dictionary, on the grounds that a word the author wrote down is the
+  better guess between two equally close candidates. Candidates shorter than 3
+  characters are dropped as noise.
 
 ## Credit & license
 

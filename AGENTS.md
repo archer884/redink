@@ -14,10 +14,13 @@ register coinages, **not** to "improve" the writing.
 
 ```sh
 redink check --json path/to/file.md     # one JSON object per occurrence
+redink check --json chapters/           # every .md/.txt under a directory
 redink check --json                     # all .md/.txt in cwd
 ```
 
-Exit code: `0` clean, `1` misspellings present, `2` hard error. Each object:
+Exit code: `0` clean, `1` misspellings present, `2` hard error. A file that
+could not be read (mistyped path, bad permissions) is a hard error, **not** a
+clean result — so `0` always means "checked, and found nothing". Each object:
 
 ```json
 {
@@ -56,13 +59,19 @@ redink dict add "per se"            # a multi-word argument becomes a phrase
 redink dict add --sensitive "Tzeya Gan"  # multi-word + --sensitive = exact-case phrase
 ```
 
-…or edit `.redink.dic` directly (it is plain text, sorted, git-friendly):
+…or edit `.redink.dic` directly (it is plain text, sorted, git-friendly). Only
+whole-line comments are recognized — a `#` after an entry is part of the entry,
+so annotate on its own line, never trailing:
 
 ```text
-hobbit        # case-insensitive
-=Gondor       # exact case
-per se        # phrase (matched against neighbouring words)
-=Tzeya Gan    # phrase, exact casing only
+# a bare word is case-insensitive
+hobbit
+# a = prefix means exact case only
+=Gondor
+# a line with a space is a phrase, matched against neighbouring words
+per se
+# and = works there too, for a phrase in exact casing only
+=Tzeya Gan
 ```
 
 You only ever edit the **working** dictionary. The system dictionary (vendored
@@ -97,6 +106,12 @@ SCOWL) is read-only — never modify `assets/dict/`.
 - Never reflow, reformat, or rewrap prose. A fix touches exactly one token.
 - Don't introduce changes inside code, frontmatter, URLs, or comments.
 - Suggestions under 3 characters are already filtered out as noise.
+- The first suggestion is the best guess, but never apply one blindly to a
+  coinage. System-dictionary candidates keep that dictionary's ranking; entries
+  from the working dictionary are merged in at the position their closeness to
+  the flagged word earns, and win exact ties. So a project word at the top is a
+  hint that the token is a near-miss of an existing coinage — check
+  `.redink.dic` before assuming it is a misspelled English word.
 
 ## Developing redink
 
@@ -104,16 +119,37 @@ Rust 2024 edition. Modules: `main`/`cli` (dispatch), `engine` (dictionary
 layers + checking/suggesting), `sysdict` (locate/embed system dict), `dict`
 (working dictionary + possessive canonicalization + phrase bigrams), `token`
 (word tokenizer), `format` (Markdown skip ranges), `check` (drive files →
-`Misspelling`), `report` (text/json/words output), `tui` (ratatui app).
+`Misspelling`), `report` (text/json/words output), `fsutil` (atomic,
+permission-preserving file replacement — every write to a manuscript or
+dictionary goes through it), `tui` (ratatui app).
+
+Two things in `engine` are easy to undo by accident:
+
+- **`Suggest::Fast` vs `Suggest::Thorough`.** Spellbook runs an ngram pass
+  whenever its `uppercase`/`rep`/`map` strategies miss, which is most ordinary
+  typos, and that pass is ~97% of the time spent suggesting. `Fast` (bulk
+  `check`) skips it unless the cheap strategies find nothing; `Thorough` (the
+  TUI, one focused word at a time) always allows it. Measured on 1 500 realistic
+  single-edit typos, `Fast` loses no recall at top-1, top-3 or top-9.
+- **The custom-dictionary suggester keeps ngram in both modes.** It is what
+  finds `Gondor` from `gondr`, and the working dictionary is small enough that
+  the pass is free.
+
+`report::Row` is a hand-written mirror of the JSON schema, not a `Serialize` on
+`Misspelling`: its field names *and their order* are the published contract, so
+changing one there is a visible edit to what agents parse.
 
 Before finishing any change, run:
 
 ```sh
 cargo test
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
+cargo fmt
 ```
 
-Both must pass clean. The vendored dictionary is SCOWL `en_US` 2020.12.07,
+(`--all-targets` so the lint gate covers the tests too, not just the binary.)
+
+All three must pass clean. The vendored dictionary is SCOWL `en_US` 2020.12.07,
 kept pristine in `assets/dict/`. Local fixes are exact-line replacements in
 `assets/dict/en_US.patches` (`old -> new`, e.g. `else -> else/M`,
 `saddler/S -> saddler/SM`), applied at build time by `build.rs` — never edit

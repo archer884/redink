@@ -9,6 +9,16 @@ use crate::engine::Engine;
 use crate::format::{self, Format};
 use crate::token::{Token, tokenize_with_lowercase};
 
+/// The hyphenated token a flagged part belongs to. Carries its position as
+/// well as its text: an editor that fixes one part has to be able to say
+/// exactly where the compound sits in order to keep the text current.
+#[derive(Debug, Clone)]
+pub struct Compound {
+    pub text: String,
+    /// Absolute byte offset of the compound's start in the file.
+    pub byte_offset: usize,
+}
+
 /// A single misspelled-word occurrence in a file.
 #[derive(Debug, Clone)]
 pub struct Misspelling {
@@ -23,9 +33,9 @@ pub struct Misspelling {
     /// Filled in later (batch, deduplicated) by the caller; `None` until then.
     pub suggestions: Option<Vec<String>>,
     /// If this occurrence is a part of a hyphenated compound that was not
-    /// recognized as a whole, the full token text. `None` for plain
+    /// recognized as a whole, that whole token. `None` for plain
     /// (non-compound) words.
-    pub compound: Option<String>,
+    pub compound: Option<Compound>,
 }
 
 /// Check a single file, returning its misspellings in source order.
@@ -55,7 +65,10 @@ pub fn check_file(path: &Path, format: Format, engine: &Engine) -> Result<Vec<Mi
                 continue;
             }
             // Stage 2: split on hyphen-runs and check each non-empty part.
-            let compound = tok.word.clone();
+            let compound = Compound {
+                text: tok.word.clone(),
+                byte_offset: tok.byte_range.start,
+            };
             for (part, range) in split_hyphen_parts(&tok.word, tok.byte_range.start) {
                 if part.is_empty() || !part.chars().any(|c| c.is_alphabetic()) {
                     continue;
@@ -124,7 +137,7 @@ fn build_misspelling(
     line_starts: &LineStarts,
     word: &str,
     byte_range: &std::ops::Range<usize>,
-    compound: Option<&str>,
+    compound: Option<&Compound>,
 ) -> Misspelling {
     let (line0, col0) = line_starts.locate(byte_range.start);
     Misspelling {
@@ -134,7 +147,7 @@ fn build_misspelling(
         byte_offset: byte_range.start,
         word: word.to_string(),
         suggestions: None,
-        compound: compound.map(str::to_string),
+        compound: compound.cloned(),
     }
 }
 

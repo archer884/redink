@@ -29,15 +29,15 @@ use ratatui::{
 };
 
 use crate::check;
-use crate::check::Misspelling;
-use crate::engine::Engine;
+use crate::check::{Compound, Misspelling};
+use crate::engine::{Engine, SUGGEST_LIMIT, Suggest};
 use crate::format::{self, Format};
 use crate::token::Tokenized;
 
 type Backend = CrosstermBackend<Stdout>;
 
-pub fn run(miss: Vec<Misspelling>, engine: Engine) -> Result<()> {
-    let mut app = App::new(miss, engine)?;
+pub fn run(miss: Vec<Misspelling>, engine: Engine, format: Format) -> Result<()> {
+    let mut app = App::new(miss, engine, format)?;
 
     // Panic hook: tear the terminal down before the default hook prints, so
     // a panic message is never swallowed by the alternate screen.
@@ -92,8 +92,9 @@ struct Entry {
     word_len: usize,
     word: String,
     suggestions: Option<Vec<String>>,
-    /// The whole hyphenated compound this part belongs to, if any.
-    compound: Option<String>,
+    /// The whole hyphenated compound this part belongs to, if any, kept
+    /// current as edits shift and rewrite the text around it.
+    compound: Option<Compound>,
 }
 
 /// An in-memory editable copy of a checked file with a line-offset index.
@@ -121,8 +122,10 @@ impl FileBuf {
 
 /// Tokenize file text exactly as the check pipeline does (Markdown-aware
 /// skips included), for phrase-context re-checks after dictionary changes.
-fn file_tokens(text: &str, path: &std::path::Path) -> Tokenized {
-    let skip = format::skip_ranges(text, Format::Auto.resolve(path));
+/// Takes the same `format` the scan ran with — resolving `Auto` here instead
+/// would silently disagree with the scan whenever `--format` was given.
+fn file_tokens(text: &str, path: &std::path::Path, format: Format) -> Tokenized {
+    let skip = format::skip_ranges(text, format.resolve(path));
     crate::token::tokenize_with_lowercase(text, &skip)
 }
 
@@ -152,6 +155,8 @@ struct App {
     files: HashMap<std::path::PathBuf, FileBuf>,
     dirty: HashSet<std::path::PathBuf>,
     engine: Engine,
+    /// The format the scan ran with, reused for phrase-context re-checks.
+    format: Format,
     suggest_cache: HashMap<String, Vec<String>>,
     /// Per-file tokenizations for phrase-context re-checks; invalidated for
     /// a file whenever its text changes.
@@ -163,7 +168,7 @@ struct App {
 }
 
 impl App {
-    fn new(miss: Vec<Misspelling>, engine: Engine) -> Result<Self> {
+    fn new(miss: Vec<Misspelling>, engine: Engine, format: Format) -> Result<Self> {
         let mut files: HashMap<std::path::PathBuf, FileBuf> = HashMap::new();
         let mut entries = Vec::with_capacity(miss.len());
         for m in miss {
@@ -194,6 +199,7 @@ impl App {
             files,
             dirty: HashSet::new(),
             engine,
+            format,
             suggest_cache: HashMap::new(),
             token_cache: HashMap::new(),
             mode: Mode::Normal,
@@ -258,10 +264,10 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Char('n') => self.cursor_next(),
             KeyCode::Char('k') | KeyCode::Up | KeyCode::Char('N') => self.cursor_prev(),
             KeyCode::Char('i') => self.ignore(),
-            KeyCode::Char('a') => self.add_ci(),
-            KeyCode::Char('A') => self.add_cs(),
-            KeyCode::Char('h') => self.add_compound_ci(),
-            KeyCode::Char('H') => self.add_compound_cs(),
+            KeyCode::Char('a') => self.add_focused(false, false),
+            KeyCode::Char('A') => self.add_focused(false, true),
+            KeyCode::Char('h') => self.add_focused(true, false),
+            KeyCode::Char('H') => self.add_focused(true, true),
             KeyCode::Char('p') => {
                 if let Some(w) = self.cur_word() {
                     self.mode = Mode::Add {
@@ -352,7 +358,7 @@ impl App {
         let stem = crate::dict::canonical(&norm);
         let layer = if sensitive { "exact case" } else { "any case" };
         self.engine.add_phrase(text, sensitive);
-        self.persist_working("add");
+        self.persist_working();
         self.retain_unresolved();
         self.message = Some(format!(
             "added \u{201c}{stem}\u{201d} ({layer}) to {}",
@@ -400,11 +406,32 @@ impl App {
         self.token_cache.remove(&path);
 
         self.entries.remove(idx);
-        if delta != 0 {
-            for e in self.entries.iter_mut() {
-                if e.path == path && e.current_offset >= end {
-                    e.current_offset = (e.current_offset as isize + delta).max(0) as usize;
+        for e in self.entries.iter_mut() {
+            if e.path != path {
+                continue;
+            }
+            if delta != 0 && e.current_offset >= end {
+                e.current_offset = (e.current_offset as isize + delta).max(0) as usize;
+            }
+            let Some(compound) = &mut e.compound else {
+                continue;
+            };
+            let compound_end = compound.byte_offset + compound.text.len();
+            if compound.byte_offset >= end {
+                if delta != 0 {
+                    compound.byte_offset = (compound.byte_offset as isize + delta).max(0) as usize;
                 }
+            } else if compound.byte_offset <= start && end <= compound_end {
+                // The edit landed inside this compound — this entry is a
+                // sibling part of the token just corrected. Splice the same
+                // change into its text, or `h` here would register a compound
+                // that still contains the typo. Working from positions rather
+                // than searching for the old text keeps this exact even when a
+                // compound repeats a part ("teh-teh").
+                let at = start - compound.byte_offset;
+                compound
+                    .text
+                    .replace_range(at..at + entry.word_len, new_word);
             }
         }
         if self.cursor >= self.entries.len() && !self.entries.is_empty() {
@@ -423,73 +450,35 @@ impl App {
         self.message = Some(format!("ignored \u{201c}{stem}\u{201d} for this session"));
     }
 
-    fn add_ci(&mut self) {
-        let Some(word) = self.cur_word().map(str::to_string) else {
+    /// Register the focused token in the working dictionary and drop every
+    /// entry the addition resolves. `whole_compound` adds the entire
+    /// hyphenated token rather than the flagged part (so `Tzeya-Gan` clears
+    /// both `Tzeya` and `Gan`); `sensitive` registers it for exact casing only.
+    /// This is the `a`/`A`/`h`/`H` keys, which differ only in those two flags.
+    fn add_focused(&mut self, whole_compound: bool, sensitive: bool) {
+        let Some(entry) = self.entries.get(self.cursor) else {
             return;
         };
-        let stem = crate::dict::canonical(&word);
-        self.engine.add_ci(&word);
-        self.persist_working("add");
+        let token = match (whole_compound, &entry.compound) {
+            (true, Some(compound)) => compound.text.clone(),
+            _ => entry.word.clone(),
+        };
+        let stem = crate::dict::canonical(&token);
+        if sensitive {
+            self.engine.add_cs(&token);
+        } else {
+            self.engine.add_ci(&token);
+        }
+        self.persist_working();
         self.retain_unresolved();
+        let layer = if sensitive { "exact case" } else { "any case" };
         self.message = Some(format!(
-            "added \u{201c}{stem}\u{201d} (any case) to {}",
+            "added \u{201c}{stem}\u{201d} ({layer}) to {}",
             self.engine.working_path().display()
         ));
     }
 
-    fn add_cs(&mut self) {
-        let Some(word) = self.cur_word().map(str::to_string) else {
-            return;
-        };
-        let stem = crate::dict::canonical(&word);
-        self.engine.add_cs(&word);
-        self.persist_working("add");
-        self.retain_unresolved();
-        self.message = Some(format!(
-            "added \u{201c}{stem}\u{201d} (exact case) to {}",
-            self.engine.working_path().display()
-        ));
-    }
-
-    /// The token to act on for compound operations: the whole hyphenated
-    /// compound when the focused entry is a part of one, otherwise the word.
-    fn current_token(&self) -> Option<String> {
-        self.entries
-            .get(self.cursor)
-            .map(|e| e.compound.clone().unwrap_or_else(|| e.word.clone()))
-    }
-
-    /// Add the whole compound (case-insensitive) — resolves every sibling part.
-    fn add_compound_ci(&mut self) {
-        let Some(tok) = self.current_token() else {
-            return;
-        };
-        let stem = crate::dict::canonical(&tok);
-        self.engine.add_ci(&tok);
-        self.persist_working("add");
-        self.retain_unresolved();
-        self.message = Some(format!(
-            "added \u{201c}{stem}\u{201d} (any case) to {}",
-            self.engine.working_path().display()
-        ));
-    }
-
-    /// Add the whole compound (exact case) — resolves every sibling part.
-    fn add_compound_cs(&mut self) {
-        let Some(tok) = self.current_token() else {
-            return;
-        };
-        let stem = crate::dict::canonical(&tok);
-        self.engine.add_cs(&tok);
-        self.persist_working("add");
-        self.retain_unresolved();
-        self.message = Some(format!(
-            "added \u{201c}{stem}\u{201d} (exact case) to {}",
-            self.engine.working_path().display()
-        ));
-    }
-
-    fn persist_working(&mut self, _label: &str) {
+    fn persist_working(&mut self) {
         if let Err(e) = self.engine.save_working() {
             self.message = Some(format!("could not save working dict: {e}"));
         }
@@ -505,16 +494,15 @@ impl App {
         let mut keep: Vec<bool> = Vec::with_capacity(self.entries.len());
         for e in &self.entries {
             let part_ok = self.engine.check(&e.word);
-            let compound_ok = e.compound.as_ref().is_some_and(|c| self.engine.check(c));
+            let compound_ok = e
+                .compound
+                .as_ref()
+                .is_some_and(|c| self.engine.check(&c.text));
             keep.push(!(part_ok || compound_ok) && !self.entry_phrase_covered(e, &mut token_cache));
         }
         self.token_cache = token_cache;
-        let mut i = 0;
-        self.entries.retain(|_| {
-            let k = keep[i];
-            i += 1;
-            k
-        });
+        let mut keep = keep.into_iter();
+        self.entries.retain(|_| keep.next().unwrap_or(true));
         if self.cursor >= self.entries.len() {
             self.cursor = self.entries.len().saturating_sub(1);
         }
@@ -532,7 +520,7 @@ impl App {
             let toks = self
                 .files
                 .get(&entry.path)
-                .map(|buf| file_tokens(&buf.text, &entry.path));
+                .map(|buf| file_tokens(&buf.text, &entry.path, self.format));
             cache.insert(entry.path.clone(), toks);
         }
         let Some(t) = cache.get(&entry.path).and_then(|t| t.as_ref()) else {
@@ -593,7 +581,14 @@ impl App {
             let sugs = self
                 .suggest_cache
                 .entry(entry.word.clone())
-                .or_insert_with(|| self.engine.suggest(&entry.word))
+                .or_insert_with(|| {
+                    // One focused word at a time: the extra ~1ms of ngram
+                    // search is invisible here and buys the best answer for a
+                    // badly mangled word.
+                    let mut sugs = self.engine.suggest(&entry.word, Suggest::Thorough);
+                    sugs.truncate(SUGGEST_LIMIT);
+                    sugs
+                })
                 .clone();
             entry.suggestions = Some(sugs);
         }
@@ -792,14 +787,15 @@ impl App {
             lines.push(Line::from("(no suggestions)"));
             lines.push(Line::from("r \u{2014} type a replacement"));
         } else {
-            for (i, s) in suggestions.iter().take(9).enumerate() {
+            for (i, s) in suggestions.iter().take(SUGGEST_LIMIT).enumerate() {
                 lines.push(Line::from(format!(" {}) {}", i + 1, s)));
             }
         }
         if let Some(comp) = &entry.compound {
             lines.push(Line::from(""));
             lines.push(Line::from(format!(
-                "part of {comp} \u{2014} h add whole, H exact-case"
+                "part of {} \u{2014} h add whole, H exact-case",
+                comp.text
             )));
         }
         lines
@@ -891,7 +887,7 @@ mod tests {
             suggestions: None,
             compound: None,
         }];
-        App::new(miss, engine).unwrap()
+        App::new(miss, engine, Format::Auto).unwrap()
     }
 
     #[test]
@@ -914,6 +910,7 @@ mod tests {
             ]),
             dirty: HashSet::from([good.clone(), blocked.clone()]),
             engine,
+            format: Format::Auto,
             suggest_cache: HashMap::new(),
             token_cache: HashMap::new(),
             mode: Mode::Normal,
@@ -930,6 +927,38 @@ mod tests {
 
         let loaded = crate::dict::load(&work).unwrap();
         assert!(loaded.is_empty());
+    }
+
+    /// Fixing one part of a hyphenated compound has to update what its
+    /// siblings believe the compound says — otherwise `h` on a sibling
+    /// registers a coinage still containing the typo just corrected. The
+    /// repeated-part case ("teh-teh") is what rules out patching by search.
+    #[test]
+    fn sibling_compounds_track_the_edit() {
+        let s = testutil::scratch("tui-compound");
+        let path = s.path("c.md");
+        std::fs::write(&path, "teh-teh rode forth\n").unwrap();
+
+        let engine = test_engine(s.path("work.dic"));
+        let miss = crate::check::check_file(&path, Format::Auto, &engine).unwrap();
+        assert_eq!(miss.len(), 2, "expected both parts flagged: {miss:?}");
+        assert!(miss.iter().all(|m| m.compound.is_some()));
+
+        let mut app = App::new(miss, engine, Format::Auto).unwrap();
+        // Fix the *second* part: patching by string search would rewrite the
+        // first one and produce "the-teh" instead of "teh-the".
+        app.cursor = 1;
+        app.apply_replacement("the");
+
+        assert_eq!(app.entries.len(), 1, "the fixed part should be gone");
+        let survivor = &app.entries[0];
+        assert_eq!(survivor.word, "teh");
+        assert_eq!(
+            survivor.compound.as_ref().map(|c| c.text.as_str()),
+            Some("teh-the"),
+            "sibling compound went stale"
+        );
+        assert_eq!(app.files[&path].text, "teh-the rode forth\n");
     }
 
     #[test]

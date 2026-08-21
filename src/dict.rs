@@ -92,6 +92,25 @@ pub struct WorkingDict {
     pub comments: Vec<String>,
 }
 
+/// Normalize a would-be phrase: collapse whitespace runs to single spaces and
+/// reject anything that does not end up with at least two words. Returns
+/// `None` for a single word or for whitespace alone.
+///
+/// Loading, adding, and removing all have to agree on what counts as a phrase
+/// and what its canonical spelling is, so they all come through here.
+pub fn normalize_phrase(text: &str) -> Option<String> {
+    let mut words = text.split_whitespace();
+    let first = words.next()?;
+    let second = words.next()?;
+    let mut out = String::with_capacity(text.len());
+    out.push_str(first);
+    for word in [second].into_iter().chain(words) {
+        out.push(' ');
+        out.push_str(word);
+    }
+    Some(out)
+}
+
 /// Decompose a phrase into its adjacent bigrams, lowercased and
 /// whitespace-normalized. "quid pro quo" -> {"quid pro", "pro quo"}.
 pub fn phrase_bigrams(phrase: &str) -> Vec<String> {
@@ -188,20 +207,18 @@ impl WorkingDict {
     /// `sensitive`, to `phrases_cs` (exact casing).
     pub fn add_entry(&mut self, word: &str, sensitive: bool) -> AddOutcome {
         if word.chars().any(char::is_whitespace) {
-            let norm: String = word.split_whitespace().collect::<Vec<_>>().join(" ");
-            if norm.split(' ').count() >= 2 {
-                let added = if sensitive {
-                    self.phrases_cs.insert(norm)
-                } else {
-                    self.phrases.insert(norm.to_lowercase())
-                };
-                if added {
-                    AddOutcome::Added
-                } else {
-                    AddOutcome::Duplicate
-                }
+            let Some(norm) = normalize_phrase(word) else {
+                return AddOutcome::Ignored;
+            };
+            let added = if sensitive {
+                self.phrases_cs.insert(norm)
             } else {
-                AddOutcome::Ignored
+                self.phrases.insert(norm.to_lowercase())
+            };
+            if added {
+                AddOutcome::Added
+            } else {
+                AddOutcome::Duplicate
             }
         } else if sensitive {
             if self.add_cs(word) {
@@ -231,11 +248,8 @@ impl WorkingDict {
         if self.ci.remove(&c.to_lowercase()) || self.cs.remove(&c) {
             return true;
         }
-        if c.chars().any(char::is_whitespace) {
-            let norm: String = c.split_whitespace().collect::<Vec<_>>().join(" ");
-            if norm.split(' ').count() >= 2 {
-                return self.phrases_cs.remove(&norm) || self.phrases.remove(&norm.to_lowercase());
-            }
+        if let Some(norm) = normalize_phrase(&c) {
+            return self.phrases_cs.remove(&norm) || self.phrases.remove(&norm.to_lowercase());
         }
         false
     }
@@ -307,8 +321,7 @@ pub fn load(path: &Path) -> anyhow::Result<WorkingDict> {
             None => (line, false),
         };
         if body.chars().any(char::is_whitespace) {
-            let norm: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
-            if norm.split(' ').count() >= 2 {
+            if let Some(norm) = normalize_phrase(body) {
                 if sensitive {
                     dict.phrases_cs.insert(norm);
                 } else {

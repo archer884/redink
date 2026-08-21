@@ -12,7 +12,9 @@ pub enum Format {
     /// Detect from the file extension (markdown for `.md`/`.markdown`, else text).
     Auto,
     /// Markdown: skip fenced/indented code blocks, inline code, URLs, and
-    /// YAML/TOML frontmatter.
+    /// YAML/TOML frontmatter. `md` is accepted too — nobody wants to type the
+    /// long form at a prompt.
+    #[value(alias = "md")]
     Markdown,
     /// Plain text: check everything.
     Text,
@@ -145,6 +147,19 @@ fn url_ranges(src: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn md_is_accepted_for_markdown() {
+        use clap::ValueEnum;
+        assert_eq!(Format::from_str("md", false).unwrap(), Format::Markdown);
+        assert_eq!(
+            Format::from_str("markdown", false).unwrap(),
+            Format::Markdown
+        );
+        assert_eq!(Format::from_str("auto", false).unwrap(), Format::Auto);
+        assert_eq!(Format::from_str("text", false).unwrap(), Format::Text);
+        assert!(Format::from_str("bogus", false).is_err());
+    }
 
     #[test]
     fn skips_inline_and_fenced_code() {
