@@ -25,7 +25,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListState, Paragraph, Wrap},
 };
 
 use crate::check;
@@ -820,49 +820,97 @@ impl App {
     }
 
     fn draw_help(&self, f: &mut Frame<'_>) {
-        let area = centered(60, 70, f.area());
-        let text = vec![
-            Line::from("redink \u{2014} keybindings"),
-            Line::from(""),
-            Line::from("  j k n N    move between misspellings"),
-            Line::from("  1-9         replace with Nth suggestion"),
-            Line::from("  r           type a replacement (Enter/Esc)"),
-            Line::from("  i           ignore this word for the session"),
-            Line::from("  a           add word, lowercase (case-insensitive)"),
-            Line::from("  A           add word, exact-case (case-sensitive)"),
-            Line::from("  h           add whole compound (case-insensitive)"),
-            Line::from("  H           add whole compound (exact case)"),
-            Line::from("  p           add word or phrase (prompt; = exact case)"),
-            Line::from("  s           save all edited files now"),
-            Line::from("  q           save and quit"),
-            Line::from("  Q / Ctrl-C  discard edits and quit"),
-            Line::from(""),
-            Line::from("press any key to close"),
-        ];
-        let para = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("help"))
-            .alignment(ratatui::layout::Alignment::Center);
+        let key_w = HELP_ROWS
+            .iter()
+            .map(|(k, _)| k.chars().count())
+            .max()
+            .unwrap_or(0);
+        let desc_w = HELP_ROWS
+            .iter()
+            .map(|(_, d)| d.chars().count())
+            .max()
+            .unwrap_or(0);
+        let gap = " ".repeat(HELP_GAP);
+
+        let key_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let head_style = Style::default().fg(Color::Cyan);
+
+        let mut lines: Vec<Line> = Vec::with_capacity(HELP_ROWS.len() + 2);
+        for (keys, desc) in HELP_ROWS {
+            if keys.is_empty() {
+                // Section heading, preceded by a blank line except at the top.
+                if !lines.is_empty() {
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(Span::styled(format!(" {desc}"), head_style)));
+                continue;
+            }
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {keys:<key_w$}"), key_style),
+                Span::raw(format!("{gap}{desc}")),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " press any key to close",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+
+        // Size to the content: two columns plus indent, gap, padding, borders.
+        let width = (key_w + HELP_GAP + desc_w + 5) as u16;
+        let height = lines.len() as u16 + 2;
+        let area = centered(width, height, f.area());
+
+        // Clear first, or the panes underneath show through the overlay.
+        f.render_widget(Clear, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" keys ");
+        let para = Paragraph::new(lines).block(block);
         f.render_widget(para, area);
     }
 }
 
-fn centered(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let pop = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area)[1];
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(pop)[1]
+/// Rows of the help overlay: `(keys, description)`. An empty `keys` marks a
+/// section heading.
+const HELP_ROWS: &[(&str, &str)] = &[
+    ("", "move"),
+    ("j / n / \u{2193}", "next misspelling"),
+    ("k / N / \u{2191}", "previous misspelling"),
+    ("", "fix"),
+    ("1-9", "replace with that suggestion"),
+    ("r", "type a replacement (Enter accept, Esc cancel)"),
+    ("i", "ignore this word for the session"),
+    ("", "dictionary"),
+    ("a / A", "add word \u{2014} lowercase / exact case"),
+    (
+        "h / H",
+        "add whole compound \u{2014} lowercase / exact case",
+    ),
+    ("p", "add word or phrase (prompt; = toggles exact case)"),
+    ("", "session"),
+    ("s", "save all edited files now"),
+    ("q", "save and quit"),
+    ("Q / Ctrl-C", "discard edits and quit"),
+    ("?", "this help"),
+];
+
+/// Space between the key column and its description.
+const HELP_GAP: usize = 3;
+
+/// A `width` x `height` rectangle centered in `area`, clamped to fit.
+fn centered(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]
