@@ -1,13 +1,13 @@
 //! Driving a spellcheck pass over files into a list of [`Misspelling`] records.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::dict::PhraseBigrams;
 use crate::engine::Engine;
 use crate::format::{self, Format};
-use crate::token::{Token, tokenize};
+use crate::token::{tokenize_with_lowercase, Token};
 
 /// A single misspelled-word occurrence in a file.
 #[derive(Debug, Clone)]
@@ -20,26 +20,23 @@ pub struct Misspelling {
     /// Absolute byte offset of the word start in the file.
     pub byte_offset: usize,
     pub word: String,
+    /// Filled in later (batch, deduplicated) by the caller; `None` until then.
     pub suggestions: Option<Vec<String>>,
     /// If this occurrence is a part of a hyphenated compound that was not
-    /// recognized as a whole, the full token text and its byte range. `None`
-    /// for plain (non-compound) words.
-    pub compound: Option<(String, std::ops::Range<usize>)>,
+    /// recognized as a whole, the full token text. `None` for plain
+    /// (non-compound) words.
+    pub compound: Option<String>,
 }
 
 /// Check a single file, returning its misspellings in source order.
-pub fn check_file(
-    path: &Path,
-    format: Format,
-    engine: &Engine,
-    suggest_cache: &mut HashMap<String, Vec<String>>,
-    suggest_limit: usize,
-    needs_suggestions: bool,
-) -> Result<Vec<Misspelling>> {
+/// Suggestions are left unset; callers attach them in a deduplicated pass.
+pub fn check_file(path: &Path, format: Format, engine: &Engine) -> Result<Vec<Misspelling>> {
     let src = std::fs::read_to_string(path)?;
     let line_starts = LineStarts::new(&src);
     let skip = format::skip_ranges(&src, format.resolve(path));
-    let tokens = tokenize(&src, &skip);
+    let tokenized = tokenize_with_lowercase(&src, &skip);
+    let tokens = &tokenized.tokens;
+    let lowercase = &tokenized.lowercase;
     let phrases = engine.phrase_bigrams();
     let phrases_cs = engine.phrase_bigrams_cs();
 
@@ -48,7 +45,7 @@ pub fn check_file(
         // Phrase matching: a token that forms a known bigram with its neighbour
         // (e.g. "se" in "per se") is accepted, so fragment words are only let
         // through in their phrase context and still flagged elsewhere.
-        if phrase_covered(i, &tokens, phrases, phrases_cs) {
+        if phrase_covered(i, tokens, lowercase, phrases, phrases_cs) {
             continue;
         }
         if tok.word.contains('-') {
@@ -57,7 +54,7 @@ pub fn check_file(
                 continue;
             }
             // Stage 2: split on hyphen-runs and check each non-empty part.
-            let compound = (tok.word.clone(), tok.byte_range.clone());
+            let compound = tok.word.clone();
             for (part, range) in split_hyphen_parts(&tok.word, tok.byte_range.start) {
                 if part.is_empty() || !part.chars().any(|c| c.is_alphabetic()) {
                     continue;
@@ -71,10 +68,6 @@ pub fn check_file(
                     part,
                     &range,
                     Some(&compound),
-                    engine,
-                    suggest_cache,
-                    suggest_limit,
-                    needs_suggestions,
                 ));
             }
         } else {
@@ -87,10 +80,6 @@ pub fn check_file(
                 &tok.word,
                 &tok.byte_range,
                 None,
-                engine,
-                suggest_cache,
-                suggest_limit,
-                needs_suggestions,
             ));
         }
     }
@@ -98,72 +87,48 @@ pub fn check_file(
 }
 
 /// True if `tokens[i]` forms a known phrase bigram with either neighbour.
-/// Regular phrases match case-insensitively; exact-case phrases (`=Tzeya
-/// Gan`) require the neighbouring words to match as written.
+/// Regular phrases match case-insensitively (via the parallel `lowercase`
+/// array); exact-case phrases (`=Tzeya Gan`) require the neighbouring words
+/// to match as written.
 pub(crate) fn phrase_covered(
     i: usize,
     tokens: &[Token],
-    phrases: &HashSet<String>,
-    phrases_cs: &HashSet<String>,
+    lowercase: &[String],
+    phrases: &PhraseBigrams,
+    phrases_cs: &PhraseBigrams,
 ) -> bool {
-    let w = tokens[i].word.to_lowercase();
-    if i > 0 {
-        let p = tokens[i - 1].word.to_lowercase();
-        if phrases.contains(&format!("{p} {w}")) {
-            return true;
-        }
-    }
-    if i + 1 < tokens.len() {
-        let n = tokens[i + 1].word.to_lowercase();
-        if phrases.contains(&format!("{w} {n}")) {
-            return true;
-        }
-    }
-    if i > 0 && phrases_cs.contains(&format!("{} {}", tokens[i - 1].word, tokens[i].word)) {
+    let w = &lowercase[i];
+    if i > 0
+        && (phrases.contains(&lowercase[i - 1], w)
+            || phrases_cs.contains(&tokens[i - 1].word, &tokens[i].word))
+    {
         return true;
     }
     if i + 1 < tokens.len()
-        && phrases_cs.contains(&format!("{} {}", tokens[i].word, tokens[i + 1].word))
+        && (phrases.contains(w, &lowercase[i + 1])
+            || phrases_cs.contains(&tokens[i].word, &tokens[i + 1].word))
     {
         return true;
     }
     false
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_misspelling(
     path: &Path,
     line_starts: &LineStarts,
     word: &str,
     byte_range: &std::ops::Range<usize>,
-    compound: Option<&(String, std::ops::Range<usize>)>,
-    engine: &Engine,
-    suggest_cache: &mut HashMap<String, Vec<String>>,
-    suggest_limit: usize,
-    needs_suggestions: bool,
+    compound: Option<&str>,
 ) -> Misspelling {
     let (line0, col0) = line_starts.locate(byte_range.start);
-    let suggestions = if needs_suggestions {
-        Some(
-            suggest_cache
-                .entry(word.to_string())
-                .or_insert_with(|| engine.suggest(word))
-                .iter()
-                .take(suggest_limit)
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        None
-    };
     Misspelling {
         path: path.to_path_buf(),
         line: line0 + 1,
         col: col0 + 1,
         byte_offset: byte_range.start,
         word: word.to_string(),
-        suggestions,
-        compound: compound.map(|(w, r)| (w.clone(), r.clone())),
+        suggestions: None,
+        compound: compound.map(str::to_string),
     }
 }
 
@@ -188,12 +153,12 @@ fn split_hyphen_parts(word: &str, base: usize) -> Vec<(&str, std::ops::Range<usi
 }
 
 /// Map an absolute byte offset to a 0-based (line, byte-column).
-struct LineStarts {
+pub struct LineStarts {
     starts: Vec<usize>,
 }
 
 impl LineStarts {
-    fn new(src: &str) -> Self {
+    pub fn new(src: &str) -> Self {
         let mut starts = vec![0usize];
         for (i, b) in src.bytes().enumerate() {
             if b == b'\n' {
@@ -203,7 +168,7 @@ impl LineStarts {
         Self { starts }
     }
 
-    fn locate(&self, byte_offset: usize) -> (usize, usize) {
+    pub fn locate(&self, byte_offset: usize) -> (usize, usize) {
         let line = self
             .starts
             .partition_point(|&s| s <= byte_offset)
@@ -240,44 +205,21 @@ mod tests {
         );
     }
 
-    fn check_str(src: &str) -> Vec<String> {
-        // Write to a temp file and run a real check with the bundled engine.
-        // A process-unique atomic counter avoids collisions between parallel
-        // tests (subsec_nanos alone can repeat under load).
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("redink-check-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("x.md");
-        std::fs::write(&path, src).unwrap();
-
-        let sys = crate::sysdict::resolve_embedded();
-        let dict = crate::engine::load_dictionary(&sys.aff, &sys.dic).unwrap();
-        let engine = crate::engine::Engine::new(
-            dict,
-            crate::dict::WorkingDict::default(),
-            std::path::PathBuf::from("/dev/null"),
-        );
-        let mut cache = HashMap::new();
-        let miss = check_file(&path, Format::Auto, &engine, &mut cache, 9, true).unwrap();
-        miss.into_iter().map(|m| m.word).collect()
-    }
-
     fn check_str_with(src: &str, working: crate::dict::WorkingDict) -> Vec<String> {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("redink-checkcs-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("x.md");
+        let s = crate::testutil::scratch("check");
+        let path = s.path("x.md");
         std::fs::write(&path, src).unwrap();
 
         let sys = crate::sysdict::resolve_embedded();
         let dict = crate::engine::load_dictionary(&sys.aff, &sys.dic).unwrap();
         let engine =
             crate::engine::Engine::new(dict, working, std::path::PathBuf::from("/dev/null"));
-        let mut cache = HashMap::new();
-        let miss = check_file(&path, Format::Auto, &engine, &mut cache, 9, true).unwrap();
+        let miss = check_file(&path, Format::Auto, &engine).unwrap();
         miss.into_iter().map(|m| m.word).collect()
+    }
+
+    fn check_str(src: &str) -> Vec<String> {
+        check_str_with(src, crate::dict::WorkingDict::default())
     }
 
     #[test]

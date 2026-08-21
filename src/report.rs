@@ -42,7 +42,7 @@ pub fn write_json<W: Write>(out: &mut W, miss: &[Misspelling]) -> anyhow::Result
                 "column": m.col,
                 "byte_offset": m.byte_offset,
                 "word": m.word,
-                "compound": m.compound.as_ref().map(|(w, _)| w),
+                "compound": m.compound,
             });
             if let Some(sugs) = &m.suggestions {
                 row["suggestions"] = serde_json::json!(sugs);

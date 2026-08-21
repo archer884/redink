@@ -10,9 +10,11 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 
-use anyhow::Result;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
+use anyhow::Result;use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -29,12 +31,21 @@ use crate::check;
 use crate::check::Misspelling;
 use crate::engine::Engine;
 use crate::format::{self, Format};
-use crate::token::{Token, tokenize};
+use crate::token::Tokenized;
 
 type Backend = CrosstermBackend<Stdout>;
 
 pub fn run(miss: Vec<Misspelling>, engine: Engine) -> Result<()> {
     let mut app = App::new(miss, engine)?;
+
+    // Panic hook: tear the terminal down before the default hook prints, so
+    // a panic message is never swallowed by the alternate screen.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        original_hook(info);
+    }));
 
     enable_raw_mode()?;
     // Guard: restore the terminal even if the event loop panics.
@@ -87,45 +98,31 @@ struct Entry {
 /// An in-memory editable copy of a checked file with a line-offset index.
 struct FileBuf {
     text: String,
-    line_starts: Vec<usize>,
+    line_starts: check::LineStarts,
 }
 
 impl FileBuf {
     fn new(text: String) -> Self {
-        let line_starts = compute_line_starts(&text);
+        let line_starts = check::LineStarts::new(&text);
         Self { text, line_starts }
     }
 
     fn replace(&mut self, start: usize, end: usize, with: &str) {
         self.text.replace_range(start..end, with);
-        self.line_starts = compute_line_starts(&self.text);
+        self.line_starts = check::LineStarts::new(&self.text);
     }
 
     /// (0-based line, byte column within that line)
     fn locate(&self, byte_offset: usize) -> (usize, usize) {
-        let line = self
-            .line_starts
-            .partition_point(|&s| s <= byte_offset)
-            .saturating_sub(1);
-        (line, byte_offset - self.line_starts[line])
+        self.line_starts.locate(byte_offset)
     }
-}
-
-fn compute_line_starts(text: &str) -> Vec<usize> {
-    let mut starts = vec![0usize];
-    for (i, b) in text.bytes().enumerate() {
-        if b == b'\n' {
-            starts.push(i + 1);
-        }
-    }
-    starts
 }
 
 /// Tokenize file text exactly as the check pipeline does (Markdown-aware
 /// skips included), for phrase-context re-checks after dictionary changes.
-fn file_tokens(text: &str, path: &std::path::Path) -> Vec<Token> {
+fn file_tokens(text: &str, path: &std::path::Path) -> Tokenized {
     let skip = format::skip_ranges(text, Format::Auto.resolve(path));
-    tokenize(text, &skip)
+    crate::token::tokenize_with_lowercase(text, &skip)
 }
 
 /// Collapse every run of whitespace (including newlines) into a single space,
@@ -155,6 +152,9 @@ struct App {
     dirty: HashSet<std::path::PathBuf>,
     engine: Engine,
     suggest_cache: HashMap<String, Vec<String>>,
+    /// Per-file tokenizations for phrase-context re-checks; invalidated for
+    /// a file whenever its text changes.
+    token_cache: HashMap<std::path::PathBuf, Option<Tokenized>>,
     mode: Mode,
     show_help: bool,
     message: Option<String>,
@@ -184,7 +184,7 @@ impl App {
                 word_len: m.word.len(),
                 word: m.word,
                 suggestions: m.suggestions,
-                compound: m.compound.map(|(w, _)| w),
+                compound: m.compound,
             });
         }
         Ok(App {
@@ -194,6 +194,7 @@ impl App {
             dirty: HashSet::new(),
             engine,
             suggest_cache: HashMap::new(),
+            token_cache: HashMap::new(),
             mode: Mode::Normal,
             show_help: false,
             message: None,
@@ -216,6 +217,14 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        // Ctrl-C cancels from any mode: discard edits and quit immediately.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit = true;
+            return;
+        }
         if self.show_help {
             self.show_help = false;
             return;
@@ -229,17 +238,20 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('q') => {
-                self.save_all();
-                self.quit = true;
-            }
+            KeyCode::Char('q') => match self.save_all() {
+                Ok(_) => self.quit = true,
+                Err(e) => {
+                    self.message =
+                        Some(format!("save failed (not quitting) — {e:#}; q retry, Q discard"));
+                }
+            },
             KeyCode::Char('Q') => {
                 self.quit = true;
             }
-            KeyCode::Char('s') => {
-                let n = self.save_all();
-                self.message = Some(format!("saved {n} file(s)"));
-            }
+            KeyCode::Char('s') => match self.save_all() {
+                Ok(n) => self.message = Some(format!("saved {n} file(s)")),
+                Err(e) => self.message = Some(format!("save failed — {e:#}")),
+            },
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Char('n') => self.cursor_next(),
             KeyCode::Char('k') | KeyCode::Up | KeyCode::Char('N') => self.cursor_prev(),
@@ -290,7 +302,7 @@ impl App {
                     b.pop();
                 }
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Mode::Replace(b) = &mut self.mode {
                     b.push(c);
                 }
@@ -317,13 +329,13 @@ impl App {
                     buf.pop();
                 }
             }
-            KeyCode::Char('=') => {
+            KeyCode::Char('=') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Toggle exact-case instead of inserting a literal `=`.
                 if let Mode::Add { sensitive, .. } = &mut self.mode {
                     *sensitive = !*sensitive;
                 }
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Mode::Add { buf, .. } = &mut self.mode {
                     buf.push(c);
                 }
@@ -383,6 +395,7 @@ impl App {
             buf.replace(start, end, new_word);
         }
         self.dirty.insert(path.clone());
+        self.token_cache.remove(&path);
 
         self.entries.remove(idx);
         if delta != 0 {
@@ -486,13 +499,14 @@ impl App {
     /// `Gan` parts — or if it has become phrase-covered in context (adding
     /// `per se` clears a flagged `se` that stands inside the phrase).
     fn retain_unresolved(&mut self) {
-        let mut token_cache: HashMap<std::path::PathBuf, Option<Vec<Token>>> = HashMap::new();
+        let mut token_cache = std::mem::take(&mut self.token_cache);
         let mut keep: Vec<bool> = Vec::with_capacity(self.entries.len());
         for e in &self.entries {
             let part_ok = self.engine.check(&e.word);
             let compound_ok = e.compound.as_ref().is_some_and(|c| self.engine.check(c));
             keep.push(!(part_ok || compound_ok) && !self.entry_phrase_covered(e, &mut token_cache));
         }
+        self.token_cache = token_cache;
         let mut i = 0;
         self.entries.retain(|_| {
             let k = keep[i];
@@ -510,7 +524,7 @@ impl App {
     fn entry_phrase_covered(
         &self,
         entry: &Entry,
-        cache: &mut HashMap<std::path::PathBuf, Option<Vec<Token>>>,
+        cache: &mut HashMap<std::path::PathBuf, Option<Tokenized>>,
     ) -> bool {
         if !cache.contains_key(&entry.path) {
             let toks = self
@@ -519,40 +533,53 @@ impl App {
                 .map(|buf| file_tokens(&buf.text, &entry.path));
             cache.insert(entry.path.clone(), toks);
         }
-        let Some(tokens) = cache.get(&entry.path).and_then(|t| t.as_ref()) else {
-            return false;
+        let Some(t) = cache.get(&entry.path).and_then(|t| t.as_ref()) else {            return false;
         };
         // The entry offset may point inside a compound token (it is a part
         // start), and offsets shift after replacements — find the token whose
         // span contains the current word span.
         let word_end = entry.current_offset + entry.word_len;
-        let Some(i) = tokens.iter().position(|t| {
-            t.byte_range.start <= entry.current_offset && word_end <= t.byte_range.end
+        let Some(i) = t.tokens.iter().position(|tok| {
+            tok.byte_range.start <= entry.current_offset && word_end <= tok.byte_range.end
         }) else {
             return false;
         };
         check::phrase_covered(
             i,
-            tokens,
+            &t.tokens,
+            &t.lowercase,
             self.engine.phrase_bigrams(),
             self.engine.phrase_bigrams_cs(),
         )
     }
 
-    fn save_all(&mut self) -> usize {
+    /// Write every dirty file and the working dictionary. Files that fail to
+    /// save stay dirty so a later save retries them; the first call to fail
+    /// returns the collected errors.
+    fn save_all(&mut self) -> Result<usize> {
         let dirty: Vec<_> = self.dirty.iter().cloned().collect();
-        let n = dirty.len();
+        let mut saved = 0usize;
+        let mut failures: Vec<String> = Vec::new();
         for path in &dirty {
             let Some(buf) = self.files.get(path) else {
                 continue;
             };
-            if let Err(e) = std::fs::write(path, &buf.text) {
-                self.message = Some(format!("save failed for {}: {e}", path.display()));
+            match crate::fsutil::write_atomic(path, buf.text.as_bytes()) {
+                Ok(()) => {
+                    self.dirty.remove(path);
+                    saved += 1;
+                }
+                Err(e) => failures.push(format!("{}: {e}", path.display())),
             }
         }
-        self.dirty.clear();
-        let _ = self.engine.save_working();
-        n
+        if let Err(e) = self.engine.save_working() {
+            failures.push(format!("working dict: {e}"));
+        }
+        if failures.is_empty() {
+            Ok(saved)
+        } else {
+            anyhow::bail!("{}", failures.join("; "))
+        }
     }
 
     fn ensure_suggestions_for_current(&mut self) {
@@ -808,7 +835,7 @@ impl App {
             Line::from("  p           add word or phrase (prompt; = exact case)"),
             Line::from("  s           save all edited files now"),
             Line::from("  q           save and quit"),
-            Line::from("  Q           discard edits and quit"),
+            Line::from("  Q / Ctrl-C  discard edits and quit"),
             Line::from(""),
             Line::from("press any key to close"),
         ];
@@ -836,4 +863,81 @@ fn centered(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(pop)[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dict::WorkingDict;
+    use crate::testutil;
+
+    fn test_engine(path: std::path::PathBuf) -> Engine {
+        let sys = crate::sysdict::resolve_embedded();
+        let dict = crate::engine::load_dictionary(&sys.aff, &sys.dic).unwrap();
+        Engine::new(dict, WorkingDict::default(), path)
+    }
+
+    fn app_with_one_entry(path: &std::path::Path, engine: Engine) -> App {
+        let miss = vec![Misspelling {
+            path: path.to_path_buf(),
+            line: 1,
+            col: 1,
+            byte_offset: 0,
+            word: "cdoe".to_string(),
+            suggestions: None,
+            compound: None,
+        }];
+        App::new(miss, engine).unwrap()
+    }
+
+    #[test]
+    fn save_failure_reports_and_keeps_file_dirty() {
+        let s = testutil::scratch("tui-save");
+        let good = s.path("good.md");
+        std::fs::write(&good, "cdoe").unwrap();
+        // `blocker` is a regular file, so nothing under it can be written.
+        let blocked = s.path("blocker").join("f.md");
+        std::fs::write(s.path("blocker"), b"").unwrap();
+
+        let work = s.path("work.dic");
+        let engine = test_engine(work.clone());
+        let mut app = App {
+            entries: Vec::new(),
+            cursor: 0,
+            files: HashMap::from([
+                (good.clone(), FileBuf::new("cdoe".to_string())),
+                (blocked.clone(), FileBuf::new("cdoe".to_string())),
+            ]),
+            dirty: HashSet::from([good.clone(), blocked.clone()]),
+            engine,
+            suggest_cache: HashMap::new(),
+            token_cache: HashMap::new(),
+            mode: Mode::Normal,
+            show_help: false,
+            message: None,
+            quit: false,
+        };
+        let result = app.save_all();
+        assert!(result.is_err(), "save should report the failure");
+        // The good file saved and left the dirty set; the blocked one stays.
+        assert!(!app.dirty.contains(&good));
+        assert!(app.dirty.contains(&blocked), "failed file must stay dirty");
+        assert_eq!(std::fs::read(&good).unwrap(), b"cdoe");
+
+        let loaded = crate::dict::load(&work).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn save_success_clears_dirty() {
+        let s = testutil::scratch("tui-save-ok");
+        let good = s.path("good.md");
+        std::fs::write(&good, "cdoe").unwrap();
+
+        let engine = test_engine(s.path("work.dic"));
+        let mut app = app_with_one_entry(&good, engine);
+        app.dirty.insert(good.clone());
+        assert_eq!(app.save_all().unwrap(), 1);
+        assert!(app.dirty.is_empty());
+    }
 }

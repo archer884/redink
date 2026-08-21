@@ -18,23 +18,40 @@ pub enum Format {
     Text,
 }
 
+/// Extensions treated as Markdown when discovering files and resolving
+/// `Format::Auto`.
+const MARKDOWN_EXTS: &[&str] = &["md", "markdown", "mdown", "mkd"];
+/// Additional plain-text extensions discovered by file walks.
+const TEXT_EXTS: &[&str] = &["txt", "text"];
+
+fn lower_ext(path: &std::path::Path) -> String {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
 impl Format {
     /// Resolve [`Format::Auto`] against a file extension.
     pub fn resolve(self, path: &std::path::Path) -> Self {
         match self {
             Format::Auto => {
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_ascii_lowercase())
-                    .unwrap_or_default();
-                match ext.as_str() {
-                    "md" | "markdown" | "mdown" | "mkd" => Format::Markdown,
-                    _ => Format::Text,
+                let ext = lower_ext(path);
+                if MARKDOWN_EXTS.contains(&ext.as_str()) {
+                    Format::Markdown
+                } else {
+                    Format::Text
                 }
             }
             other => other,
         }
+    }
+
+    /// True when `path` has an extension worth spellchecking (Markdown or
+    /// plain text).
+    pub fn is_checkable(path: &std::path::Path) -> bool {
+        let ext = lower_ext(path);
+        MARKDOWN_EXTS.contains(&ext.as_str()) || TEXT_EXTS.contains(&ext.as_str())
     }
 }
 
@@ -70,13 +87,14 @@ fn markdown_skip(src: &str) -> Vec<Range<usize>> {
 }
 
 /// Detect a leading YAML/TOML frontmatter block delimited by `---` lines.
+/// Opening and closing fences may carry a trailing `\r` (CRLF files).
 fn frontmatter_range(src: &str) -> Option<Range<usize>> {
     let bytes = src.as_bytes();
     let first_nl = bytes
         .iter()
         .position(|&b| b == b'\n')
         .unwrap_or(bytes.len());
-    if &bytes[..first_nl] != b"---" {
+    if trim_cr(&bytes[..first_nl]) != b"---" {
         return None;
     }
 
@@ -88,8 +106,8 @@ fn frontmatter_range(src: &str) -> Option<Range<usize>> {
             Some(e) => &src[search..e],
             None => &src[search..],
         };
-        let trimmed = line.trim_end_matches(['\r']);
-        if trimmed == "---" || trimmed == "..." {
+        let trimmed = trim_cr(line.as_bytes());
+        if trimmed == b"---" || trimmed == b"..." {
             let end = line_end.map(|e| e + 1).unwrap_or(src.len());
             return Some(0..end);
         }
@@ -99,6 +117,11 @@ fn frontmatter_range(src: &str) -> Option<Range<usize>> {
         }
     }
     None
+}
+
+/// A byte slice without one trailing ASCII `\r`, if present.
+fn trim_cr(bytes: &[u8]) -> &[u8] {
+    bytes.strip_suffix(b"\r").unwrap_or(bytes)
 }
 
 /// Bare-URL spans (`http(s)://…`, `ftp://…`) running to the next whitespace.
@@ -144,6 +167,21 @@ mod tests {
         let src = "---\ntitle: Hi\n---\nbody word";
         let r = frontmatter_range(src).unwrap();
         assert_eq!(r, 0..src.find("body").unwrap());
+    }
+
+    #[test]
+    fn frontmatter_detection_crlf() {
+        let src = "---\r\ntitle: Hi\r\n---\r\nbody word";
+        let r = frontmatter_range(src).unwrap();
+        assert_eq!(r, 0..src.find("body").unwrap());
+        let skips = markdown_skip(src);
+        let toks = crate::token::tokenize(src, &skips);
+        let words: Vec<&str> = toks.iter().map(|t| t.word.as_str()).collect();
+        assert!(words.contains(&"body"));
+        assert!(
+            !words.contains(&"title"),
+            "CRLF frontmatter leaked: {words:?}"
+        );
     }
 
     #[test]

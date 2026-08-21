@@ -17,7 +17,7 @@
 //! ```
 //! Lines starting with `#` are comments; blank lines are ignored.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const DEFAULT_NAME: &str = ".redink.dic";
@@ -25,6 +25,7 @@ const HEADER: &[&str] = &[
     "# redink working dictionary",
     "# bare word: case-insensitive  |  =Word: case-sensitive  |  multi-word line: phrase (= prefix: exact case)",
 ];
+const PHRASES_SEP: &str = "# phrases:";
 
 /// Common Latin phrases used in English prose. A token is accepted when it
 /// forms part of one of these (bigram-matched against its neighbours), so
@@ -86,6 +87,9 @@ pub struct WorkingDict {
     pub phrases: HashSet<String>,
     /// Exact-casing phrases, matched as bigrams against neighbours as written.
     pub phrases_cs: HashSet<String>,
+    /// User comment lines captured on load, re-emitted verbatim on save
+    /// (after the header, before the word lists).
+    pub comments: Vec<String>,
 }
 
 /// Decompose a phrase into its adjacent bigrams, lowercased and
@@ -98,20 +102,43 @@ pub fn phrase_bigrams(phrase: &str) -> Vec<String> {
         .collect()
 }
 
-/// Build the full bigram set used for phrase matching: the bundled Latin list
-/// plus any project phrases from the working dictionary.
-pub fn build_phrase_bigrams(user_phrases: &HashSet<String>) -> HashSet<String> {
-    let mut set = HashSet::new();
+/// Phrase bigrams indexed first word -> set of successor words, so adjacency
+/// lookups during checking are two hash probes with no allocation.
+#[derive(Debug, Default, Clone)]
+pub struct PhraseBigrams {
+    map: HashMap<String, HashSet<String>>,
+}
+
+impl PhraseBigrams {
+    pub fn from_phrases<'a>(phrases: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+        for phrase in phrases {
+            for bg in phrase_bigrams(phrase) {
+                let (first, second) = bg.split_once(' ').expect("bigram is two words");
+                map.entry(first.to_string())
+                    .or_default()
+                    .insert(second.to_string());
+            }
+        }
+        Self { map }
+    }
+
+    /// True when `first second` occurring adjacently forms a known phrase.
+    pub fn contains(&self, first: &str, second: &str) -> bool {
+        self.map
+            .get(first)
+            .is_some_and(|successors| successors.contains(second))
+    }
+}
+
+/// Build the full bigram index used for phrase matching: the bundled Latin
+/// list plus any project phrases from the working dictionary.
+pub fn build_phrase_bigrams(user_phrases: &HashSet<String>) -> PhraseBigrams {
     let all = LATIN_PHRASES
         .iter()
         .copied()
         .chain(user_phrases.iter().map(String::as_str));
-    for p in all {
-        for bg in phrase_bigrams(p) {
-            set.insert(bg);
-        }
-    }
-    set
+    PhraseBigrams::from_phrases(all)
 }
 
 /// Strip a trailing English possessive (`'s` / `'s` / `'S` / `'S`, using an
@@ -261,7 +288,15 @@ pub fn load(path: &Path) -> anyhow::Result<WorkingDict> {
     };
     for raw in text.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('#') {
+            // Generated lines are re-emitted by the renderer; anything else
+            // is a user annotation and must survive a save.
+            if !HEADER.contains(&line) && line != PHRASES_SEP {
+                dict.comments.push(line.to_string());
+            }
             continue;
         }
         // A `=` prefix marks case-sensitive; a line containing whitespace is
@@ -295,76 +330,97 @@ pub fn load(path: &Path) -> anyhow::Result<WorkingDict> {
 
 /// Persist the working dictionary, sorted for clean diffs. Exact-case
 /// entries shadowed by a case-insensitive one (`foo` also covers `=Foo`)
-/// are pruned, as are exact-case phrases shadowed by a CI phrase.
+/// are pruned, as are exact-case phrases shadowed by a CI phrase. User
+/// comment lines captured at load are re-emitted after the header.
 pub fn save(path: &Path, dict: &WorkingDict) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    crate::fsutil::write_atomic(path, dict.render().as_bytes())
+}
+
+impl WorkingDict {
+    /// The full dictionary file: header comments, preserved user comments,
+    /// then the rendered entries.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for h in HEADER {
+            out.push_str(h);
+            out.push('\n');
+        }
+        if !self.comments.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&self.render_body());
+        out
     }
 
-    let mut ci: Vec<&String> = dict.ci.iter().collect();
-    ci.sort();
-    let mut cs: Vec<&String> = dict
-        .cs
-        .iter()
-        .filter(|w| !dict.ci.contains(&w.to_lowercase()))
-        .collect();
-    cs.sort();
-    let mut ph: Vec<&String> = dict.phrases.iter().collect();
-    ph.sort();
-    let mut phcs: Vec<&String> = dict
-        .phrases_cs
-        .iter()
-        .filter(|w| !dict.phrases.contains(&w.to_lowercase()))
-        .collect();
-    phcs.sort();
+    /// Everything except the canned header: user comments, CI words, `=CS`
+    /// words, then the phrases section. Shared by `save` and `dict list`.
+    pub fn render_body(&self) -> String {
+        let mut ci: Vec<&String> = self.ci.iter().collect();
+        ci.sort();
+        let mut cs: Vec<&String> = self
+            .cs
+            .iter()
+            .filter(|w| !self.ci.contains(&w.to_lowercase()))
+            .collect();
+        cs.sort();
+        let mut ph: Vec<&String> = self.phrases.iter().collect();
+        ph.sort();
+        let mut phcs: Vec<&String> = self
+            .phrases_cs
+            .iter()
+            .filter(|w| !self.phrases.contains(&w.to_lowercase()))
+            .collect();
+        phcs.sort();
 
-    let mut out = String::new();
-    for h in HEADER {
-        out.push_str(h);
-        out.push('\n');
-    }
-    for w in &ci {
-        out.push_str(w);
-        out.push('\n');
-    }
-    for w in &cs {
-        out.push('=');
-        out.push_str(w);
-        out.push('\n');
-    }
-    if !ph.is_empty() || !phcs.is_empty() {
-        out.push_str("# phrases:\n");
-        for w in &ph {
+        let mut out = String::new();
+        for c in &self.comments {
+            out.push_str(c);
+            out.push('\n');
+        }
+        if !self.comments.is_empty() {
+            out.push('\n');
+        }
+        for w in &ci {
             out.push_str(w);
             out.push('\n');
         }
-        for w in &phcs {
+        for w in &cs {
             out.push('=');
             out.push_str(w);
             out.push('\n');
         }
+        if !ph.is_empty() || !phcs.is_empty() {
+            out.push_str(PHRASES_SEP);
+            out.push('\n');
+            for w in &ph {
+                out.push_str(w);
+                out.push('\n');
+            }
+            for w in &phcs {
+                out.push('=');
+                out.push_str(w);
+                out.push('\n');
+            }
+        }
+        out
     }
-    std::fs::write(path, out)?;
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil;
 
-    fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos();
-        let dir = std::env::temp_dir().join(format!("redink-test-{nanos}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join(name)
+    /// (keep-alive guard, path of `name` inside a fresh scratch dir)
+    fn scratch(name: &str) -> (testutil::Scratch, PathBuf) {
+        let s = testutil::scratch("dict");
+        let p = s.path(name);
+        (s, p)
     }
 
     #[test]
     fn roundtrip() {
-        let p = scratch("d.dic");
+        let (_s, p) = scratch("d.dic");
         let mut d = WorkingDict::default();
         d.add_ci("hobbit");
         d.add_cs("Gondor");
@@ -378,7 +434,7 @@ mod tests {
 
     #[test]
     fn missing_file_is_empty() {
-        let p = scratch("nope.dic");
+        let (_s, p) = scratch("nope.dic");
         assert!(load(&p).unwrap().is_empty());
     }
 
@@ -453,7 +509,7 @@ mod tests {
 
     #[test]
     fn phrase_load_save_roundtrip() {
-        let p = scratch("phrases.dic");
+        let (_s, p) = scratch("phrases.dic");
         let mut d = WorkingDict::default();
         d.phrases.insert("per se".to_string());
         d.phrases.insert("quid pro quo".to_string());
@@ -473,7 +529,7 @@ mod tests {
     /// literal "=..." word (regression: the prefix used to be baked in).
     #[test]
     fn phrase_cs_prefix_parses() {
-        let p = scratch("cs-phrase.dic");
+        let (_s, p) = scratch("cs-phrase.dic");
         std::fs::write(&p, "hobbit\n=Gondor\nper se\n=Tzeya Gan\n").unwrap();
         let d = load(&p).unwrap();
         assert!(d.ci.contains("hobbit"));
@@ -498,7 +554,7 @@ mod tests {
 
     #[test]
     fn save_prunes_cs_shadowed_by_ci() {
-        let p = scratch("prune.dic");
+        let (_s, p) = scratch("prune.dic");
         let mut d = WorkingDict::default();
         d.add_ci("foo");
         d.add_cs("Foo"); // shadowed by CI "foo"
@@ -513,7 +569,7 @@ mod tests {
 
     #[test]
     fn save_prunes_phrase_cs_shadowed_by_phrase() {
-        let p = scratch("prune-phrase.dic");
+        let (_s, p) = scratch("prune-phrase.dic");
         let mut d = WorkingDict::default();
         d.phrases.insert("tzeya gan".to_string());
         d.phrases_cs.insert("Tzeya Gan".to_string()); // shadowed
@@ -527,6 +583,28 @@ mod tests {
             "=Tzeya Gan is redundant next to tzeya gan"
         );
         assert!(loaded.phrases_cs.contains("Tzeya Gam"));
+    }
+
+    #[test]
+    fn user_comments_survive_roundtrip() {
+        let (_s, p) = scratch("comments.dic");
+        std::fs::write(
+            &p,
+            "# redink working dictionary\n# my notes\nhobbit\n# keep me\n=Gondor\n",
+        )
+        .unwrap();
+        let d = load(&p).unwrap();
+        assert_eq!(d.comments, vec!["# my notes", "# keep me"]);
+
+        let (_s2, p2) = scratch("comments-out.dic");
+        save(&p2, &d).unwrap();
+        let text = std::fs::read_to_string(&p2).unwrap();
+        assert!(text.contains("# my notes"), "comment dropped: {text:?}");
+        assert!(text.contains("hobbit"));
+        let d2 = load(&p2).unwrap();
+        assert_eq!(d2.comments, d.comments);
+        assert!(d2.ci.contains("hobbit"));
+        assert!(d2.cs.contains("Gondor"));
     }
 
     #[test]

@@ -1240,7 +1240,6 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "rayon",
- "serde",
  "serde_json",
  "spellbook",
 ]

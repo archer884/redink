@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
+use rayon::prelude::*;
 
 mod check;
 mod cli;
@@ -14,17 +15,18 @@ mod dict;
 mod dictpatch;
 mod engine;
 mod format;
+mod fsutil;
 mod report;
 mod sysdict;
+#[cfg(test)]
+mod testutil;
 mod token;
 mod tui;
 
 use cli::{Command, DictAction};
 use engine::Engine;
 
-const SUGGEST_LIMIT: usize = 9;
-
-fn main() -> ExitCode {
+const SUGGEST_LIMIT: usize = 9;fn main() -> ExitCode {
     let args = cli::Cli::parse();
     match run(args) {
         Ok(code) => code,
@@ -41,6 +43,17 @@ fn run(args: cli::Cli) -> Result<ExitCode> {
         command,
         files,
     } = args;
+
+    // No subcommand: TUI when interactive, otherwise a plain text check.
+    let command = match command {
+        Some(c) => Some(c),
+        None if std::io::stdout().is_terminal() => Some(Command::Tui { files }),
+        None => Some(Command::Check {
+            files,
+            json: false,
+            words: false,
+        }),
+    };
 
     match command {
         Some(Command::Fix { file, at, word, to }) => {
@@ -79,35 +92,7 @@ fn run(args: cli::Cli) -> Result<ExitCode> {
             tui::run(miss, engine)?;
             Ok(ExitCode::SUCCESS)
         }
-        None => {
-            // No subcommand: files given on the command line (or, if none,
-            // everything checkable in the cwd). TUI if interactive, else check.
-            let files = if files.is_empty() {
-                discover_files()
-            } else {
-                files
-            };
-            if std::io::stdout().is_terminal() {
-                let engine = build_engine(&opts)?;
-                let miss = check_all(&files, opts.format, &engine, false)?;
-                tui::run(miss, engine)?;
-                Ok(ExitCode::SUCCESS)
-            } else {
-                let engine = build_engine(&opts)?;
-                let miss = check_all(&files, opts.format, &engine, true)?;
-                let found = !miss.is_empty();
-                let mut out = std::io::stdout().lock();
-                report::write_text(&mut out, &miss)?;
-                if found {
-                    eprintln!("{}", report::summary(&miss));
-                }
-                Ok(if found {
-                    ExitCode::from(1)
-                } else {
-                    ExitCode::SUCCESS
-                })
-            }
-        }
+        None => unreachable!("command is always resolved above"),
     }
 }
 
@@ -121,12 +106,10 @@ fn build_engine(opts: &cli::GlobalOpts) -> Result<Engine> {
         "[dict: {} | working: {} ({} words)]",
         sys.source,
         engine.working_path().display(),
-        engine.working_ci_count() + engine.working_cs_count(),
+        engine.working_word_count(),
     );
     Ok(engine)
 }
-
-use rayon::prelude::*;
 
 fn check_all(
     files: &[PathBuf],
@@ -136,19 +119,15 @@ fn check_all(
 ) -> Result<Vec<check::Misspelling>> {
     let files = resolve_files(files);
 
-    // Step 1: Check all files in parallel, initially without computing suggestions
-    // (since suggestion generation is the slow part and we want to deduplicate it).
+    // Step 1: Check all files in parallel (suggestions, the slow part, come
+    // later so they can be deduplicated).
     let mut miss: Vec<check::Misspelling> = files
         .into_par_iter()
-        .flat_map(|f| {
-            // We pass a dummy cache since needs_suggestions=false means it won't be used.
-            let mut cache = std::collections::HashMap::new();
-            match check::check_file(&f, fmt, engine, &mut cache, SUGGEST_LIMIT, false) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("redink: skipping {}: {e}", f.display());
-                    Vec::new()
-                }
+        .flat_map(|f| match check::check_file(&f, fmt, engine) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("redink: skipping {}: {e}", f.display());
+                Vec::new()
             }
         })
         .collect();
@@ -201,22 +180,12 @@ fn discover_files() -> Vec<PathBuf> {
             continue;
         }
         let p = entry.path();
-        if is_checkable_ext(p) {
+        if format::Format::is_checkable(p) {
             out.push(p.to_path_buf());
         }
     }
     out.sort();
     out
-}
-
-fn is_checkable_ext(p: &Path) -> bool {
-    matches!(
-        p.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref(),
-        Some("md" | "markdown" | "mdown" | "mkd" | "txt" | "text")
-    )
 }
 
 fn run_dict(opts: &cli::GlobalOpts, action: DictAction) -> Result<()> {
@@ -226,29 +195,7 @@ fn run_dict(opts: &cli::GlobalOpts, action: DictAction) -> Result<()> {
             let d = dict::load(&working_path)?;
             let mut out = std::io::stdout().lock();
             let _ = writeln!(out, "# {}", working_path.display());
-            let mut ci: Vec<&String> = d.ci.iter().collect();
-            ci.sort();
-            let mut cs: Vec<&String> = d.cs.iter().collect();
-            cs.sort();
-            let mut ph: Vec<&String> = d.phrases.iter().collect();
-            ph.sort();
-            let mut phcs: Vec<&String> = d.phrases_cs.iter().collect();
-            phcs.sort();
-            for w in ci {
-                let _ = writeln!(out, "{w}");
-            }
-            for w in cs {
-                let _ = writeln!(out, "={w}");
-            }
-            if !ph.is_empty() || !phcs.is_empty() {
-                let _ = writeln!(out, "# phrases:");
-                for w in ph {
-                    let _ = writeln!(out, "{w}");
-                }
-                for w in phcs {
-                    let _ = writeln!(out, "={w}");
-                }
-            }
+            let _ = write!(out, "{}", d.render_body());
         }
         DictAction::Add { words, sensitive } => {
             let mut d = dict::load(&working_path)?;
@@ -309,6 +256,6 @@ fn apply_fix(file: &Path, at: usize, word: &str, to: &str) -> Result<()> {
     out.extend_from_slice(&src[..at]);
     out.extend_from_slice(to.as_bytes());
     out.extend_from_slice(&src[end..]);
-    std::fs::write(file, out)?;
+    fsutil::write_atomic(file, &out)?;
     Ok(())
 }

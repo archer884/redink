@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use spellbook::Dictionary;
 
-use crate::dict::{canonical, strip_possessive, WorkingDict};
+use crate::dict::{canonical, strip_possessive, PhraseBigrams, WorkingDict};
 
 /// Minimum character length for a suggestion to be shown. Shorter ones are
 /// almost always noise (e.g. "e", "s", "es").
@@ -23,13 +23,10 @@ pub struct Engine {
     dict: Dictionary,
     custom_dict: Dictionary,
     working_path: PathBuf,
-    working_ci: HashSet<String>,
-    working_cs: HashSet<String>,
-    working_phrases: HashSet<String>,
-    working_phrases_cs: HashSet<String>,
+    working: WorkingDict,
     session_ignore: HashSet<String>,
-    phrase_bigrams: HashSet<String>,
-    phrase_bigrams_cs: HashSet<String>,
+    phrase_bigrams: PhraseBigrams,
+    phrase_bigrams_cs: PhraseBigrams,
 }
 
 impl Engine {
@@ -39,28 +36,22 @@ impl Engine {
             dict,
             custom_dict,
             working_path,
-            working_ci: working.ci,
-            working_cs: working.cs,
-            working_phrases: working.phrases,
-            working_phrases_cs: working.phrases_cs,
+            working,
             session_ignore: HashSet::new(),
-            phrase_bigrams: HashSet::new(),
-            phrase_bigrams_cs: HashSet::new(),
+            phrase_bigrams: PhraseBigrams::default(),
+            phrase_bigrams_cs: PhraseBigrams::default(),
         };
         this.rebuild_phrase_bigrams();
         this
     }
 
-    pub fn working_path(&self) -> &PathBuf {
+    pub fn working_path(&self) -> &std::path::Path {
         &self.working_path
     }
 
-    pub fn working_ci_count(&self) -> usize {
-        self.working_ci.len()
-    }
-
-    pub fn working_cs_count(&self) -> usize {
-        self.working_cs.len()
+    /// Number of word entries (CI + CS layers) in the working dictionary.
+    pub fn working_word_count(&self) -> usize {
+        self.working.ci.len() + self.working.cs.len()
     }
 
     /// True if `word` is acceptable according to any dictionary layer.
@@ -96,16 +87,10 @@ impl Engine {
     /// Session-ignore + working-dictionary (ci and cs) layers, case-sensitively
     /// correct. Does not consult the system dictionary.
     fn user_layer_has(&self, word: &str) -> bool {
-        if self.session_ignore.contains(&word.to_lowercase()) {
-            return true;
-        }
-        if self.working_cs.contains(word) {
-            return true;
-        }
-        if self.working_ci.contains(&word.to_lowercase()) {
-            return true;
-        }
-        false
+        let lower = word.to_lowercase();
+        self.session_ignore.contains(&lower)
+            || self.working.cs.contains(word)
+            || self.working.ci.contains(&lower)
     }
 
     /// Suggested corrections for `word`, with up to three working-dictionary
@@ -176,17 +161,19 @@ impl Engine {
     /// Add a case-insensitive entry (accepted in any casing). The possessive
     /// stem is stored, so adding "Atrax's" registers "Atrax". Persists on save.
     pub fn add_ci(&mut self, word: &str) {
-        let word = canonical(word).to_lowercase();
-        self.working_ci.insert(word.clone());
-        let _ = self.custom_dict.add(&word);
+        let stored = canonical(word).to_lowercase();
+        if self.working.add_ci(word) {
+            let _ = self.custom_dict.add(&stored);
+        }
     }
 
     /// Add a case-sensitive entry (exact casing only). The possessive stem is
     /// stored. Persists on save.
     pub fn add_cs(&mut self, word: &str) {
-        let word = canonical(word);
-        self.working_cs.insert(word.clone());
-        let _ = self.custom_dict.add(&word);
+        let stored = canonical(word);
+        if self.working.add_cs(word) {
+            let _ = self.custom_dict.add(&stored);
+        }
     }
 
     /// Add a word or phrase (`p` in the TUI). A single word routes to
@@ -200,70 +187,58 @@ impl Engine {
         if norm.is_empty() {
             return;
         }
-        if norm.chars().any(char::is_whitespace) {
-            let added = if sensitive {
-                self.working_phrases_cs.insert(norm.clone())
-            } else {
-                self.working_phrases.insert(norm.to_lowercase())
-            };
-            if added {
-                self.rebuild_phrase_bigrams();
+        let is_phrase = norm.chars().any(char::is_whitespace);
+        match self.working.add_entry(text, sensitive) {
+            crate::dict::AddOutcome::Added if is_phrase => self.rebuild_phrase_bigrams(),
+            crate::dict::AddOutcome::Added => {
+                let stored = if sensitive {
+                    canonical(text)
+                } else {
+                    canonical(text).to_lowercase()
+                };
+                let _ = self.custom_dict.add(&stored);
             }
-        } else if sensitive {
-            self.add_cs(&norm);
-        } else {
-            self.add_ci(&norm);
+            _ => {}
         }
     }
 
-    /// Rebuild the merged ci phrase-bigram set and the cs phrase-bigram set
-    /// from the working phrase layers.
+    /// Rebuild the merged ci phrase-bigram index and the cs phrase-bigram
+    /// index from the working phrase layers.
     fn rebuild_phrase_bigrams(&mut self) {
-        self.phrase_bigrams = crate::dict::build_phrase_bigrams(&self.working_phrases);
-        let mut cs = HashSet::new();
-        for p in &self.working_phrases_cs {
-            for bg in crate::dict::phrase_bigrams(p) {
-                cs.insert(bg);
-            }
-        }
-        self.phrase_bigrams_cs = cs;
+        self.phrase_bigrams = crate::dict::build_phrase_bigrams(&self.working.phrases);
+        self.phrase_bigrams_cs = crate::dict::PhraseBigrams::from_phrases(
+            self.working.phrases_cs.iter().map(String::as_str),
+        );
     }
 
-    /// Remove an entry (matches either layer; possessive-insensitive).
-    /// Persists on save.
+    /// Remove an entry (matches either layer, words or phrases;
+    /// possessive-insensitive). Persists on save.
     #[allow(dead_code)]
     pub fn remove(&mut self, word: &str) -> bool {
-        let c = canonical(word);
-        let a = self.working_ci.remove(&c.to_lowercase());
-        let b = self.working_cs.remove(&c);
-        let removed = a || b;
+        let removed = self.working.remove(word);
         if removed {
-            self.custom_dict = build_custom_dict(&self.working_ci, &self.working_cs);
+            self.custom_dict = build_custom_dict(&self.working.ci, &self.working.cs);
+            self.rebuild_phrase_bigrams();
         }
         removed
     }
 
-    /// The merged phrase-bigram set (bundled Latin list + project phrases),
-    /// used by the checker to accept tokens that are part of a known phrase.
-    pub fn phrase_bigrams(&self) -> &HashSet<String> {
+    /// The merged phrase-bigram index (bundled Latin list + project
+    /// phrases), used by the checker to accept tokens that are part of a
+    /// known phrase.
+    pub fn phrase_bigrams(&self) -> &PhraseBigrams {
         &self.phrase_bigrams
     }
 
     /// Exact-casing phrase bigrams from the working dictionary: a token is
     /// covered only when the neighbouring words match the phrase as written.
-    pub fn phrase_bigrams_cs(&self) -> &HashSet<String> {
+    pub fn phrase_bigrams_cs(&self) -> &PhraseBigrams {
         &self.phrase_bigrams_cs
     }
 
     /// Write the working dictionary back to disk.
     pub fn save_working(&self) -> anyhow::Result<()> {
-        let dict = WorkingDict {
-            ci: self.working_ci.clone(),
-            cs: self.working_cs.clone(),
-            phrases: self.working_phrases.clone(),
-            phrases_cs: self.working_phrases_cs.clone(),
-        };
-        crate::dict::save(&self.working_path, &dict)
+        crate::dict::save(&self.working_path, &self.working)
     }
 }
 
@@ -277,7 +252,9 @@ fn build_custom_dict(ci: &HashSet<String>, cs: &HashSet<String>) -> Dictionary {
 
 /// True for tokens made entirely of ASCII uppercase letters and digits with at
 /// least one letter ("XVII", "NASA", "M16", "3M"). These are acronyms, model
-/// numbers, or Roman numerals and are skipped by default.
+/// numbers, or Roman numerals and are skipped by default. Note this includes
+/// single capitals ("B", "K") — initials and notation, not misspellings — by
+/// design.
 fn is_all_caps_alnum(word: &str) -> bool {
     let mut has_letter = false;
     word.chars().all(|c| {
@@ -346,9 +323,8 @@ mod tests {
     /// round-trips through save_working.
     #[test]
     fn add_phrase_layers_and_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("redink-addphrase-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("t.dic");
+        let s = crate::testutil::scratch("addphrase");
+        let path = s.path("t.dic");
         let _ = std::fs::remove_file(&path);
 
         let sys = crate::sysdict::resolve_embedded();
@@ -362,18 +338,18 @@ mod tests {
         // Phrases: bigrams live, on the right layer.
         e.add_phrase("tzeya gan", false);
         assert!(
-            e.phrase_bigrams().contains("tzeya gan"),
+            e.phrase_bigrams().contains("tzeya", "gan"),
             "ci bigram missing after add_phrase"
         );
         e.add_phrase("Tzeya Gan", true);
         assert!(
-            e.phrase_bigrams_cs().contains("Tzeya Gan"),
+            e.phrase_bigrams_cs().contains("Tzeya", "Gan"),
             "cs bigram missing after add_phrase"
         );
 
         // Whitespace is normalized: extra spaces still yield one clean entry.
         e.add_phrase("per   se", false);
-        assert!(e.phrase_bigrams().contains("per se"));
+        assert!(e.phrase_bigrams().contains("per", "se"));
 
         e.save_working().unwrap();
         let loaded = crate::dict::load(&path).unwrap();
