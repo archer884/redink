@@ -15,12 +15,18 @@ pub struct Token {
     pub byte_range: Range<usize>,
 }
 
-/// Tokens plus a parallel array of their lowercased words, so phrase
-/// matching never re-lowercases per lookup.
+/// Tokens plus companion arrays for phrase matching: each token's lowercased
+/// word, and whether the source gap to the previous token is "clean"
+/// (whitespace-only, at most one newline — so a soft line wrap within a
+/// paragraph joins a phrase, but sentence punctuation and paragraph breaks
+/// do not).
 #[derive(Debug, Clone)]
 pub struct Tokenized {
     pub tokens: Vec<Token>,
     pub lowercase: Vec<String>,
+    /// `gap_clean[i]` describes the gap between tokens `i-1` and `i`;
+    /// `gap_clean[0]` is always `false` (there is no preceding token).
+    pub gap_clean: Vec<bool>,
 }
 
 #[inline]
@@ -50,11 +56,28 @@ pub fn tokenize(src: &str, skip: &[Range<usize>]) -> Vec<Token> {
     out
 }
 
-/// [`tokenize`] with the lowercase companion array for phrase matching.
+/// [`tokenize`] with the lowercase and gap arrays for phrase matching.
 pub fn tokenize_with_lowercase(src: &str, skip: &[Range<usize>]) -> Tokenized {
     let tokens = tokenize(src, skip);
     let lowercase = tokens.iter().map(|t| t.word.to_lowercase()).collect();
-    Tokenized { tokens, lowercase }
+    let mut gap_clean = Vec::with_capacity(tokens.len());
+    gap_clean.push(false);
+    for pair in tokens.windows(2) {
+        let clean = gap_is_clean(&src[pair[0].byte_range.end..pair[1].byte_range.start]);
+        gap_clean.push(clean);
+    }
+    Tokenized {
+        tokens,
+        lowercase,
+        gap_clean,
+    }
+}
+
+/// A gap joins a phrase only when it is pure whitespace containing at most
+/// one newline: "per se", "per  se", and "per\nse" (soft wrap) qualify;
+/// "per. Se", "per; se", "per\n\nse", and "per `code` se" do not.
+fn gap_is_clean(gap: &str) -> bool {
+    gap.chars().all(char::is_whitespace) && gap.bytes().filter(|&b| b == b'\n').count() <= 1
 }
 
 /// Sort and merge the skip ranges into a disjoint, ordered set, so an
@@ -164,5 +187,23 @@ mod tests {
         assert_eq!(t2[0].word, "Athrune");
         let t3 = tokenize("-foo-", &[]);
         assert_eq!(t3[0].word, "foo");
+    }
+
+    #[test]
+    fn gap_clean_flags_boundaries() {
+        let cases: &[(&str, bool)] = &[
+            ("per se", true),         // plain space
+            ("per  \t se", true),     // runs of whitespace
+            ("per\nse", true),        // soft line wrap
+            ("per.\nSe", false),      // sentence boundary
+            ("per, se", false),       // punctuation
+            ("per\n\nse", false),     // paragraph break
+            ("per\r\n\r\nse", false), // CRLF paragraph break
+            ("per 'se'", false),      // quoted fragment
+        ];
+        for &(src, want) in cases {
+            let t = tokenize_with_lowercase(src, &[]);
+            assert_eq!(t.gap_clean[1], want, "gap classification wrong for {src:?}");
+        }
     }
 }

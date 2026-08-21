@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::dict::PhraseBigrams;
 use crate::engine::Engine;
 use crate::format::{self, Format};
-use crate::token::{tokenize_with_lowercase, Token};
+use crate::token::{Token, tokenize_with_lowercase};
 
 /// A single misspelled-word occurrence in a file.
 #[derive(Debug, Clone)]
@@ -37,6 +37,7 @@ pub fn check_file(path: &Path, format: Format, engine: &Engine) -> Result<Vec<Mi
     let tokenized = tokenize_with_lowercase(&src, &skip);
     let tokens = &tokenized.tokens;
     let lowercase = &tokenized.lowercase;
+    let gap_clean = &tokenized.gap_clean;
     let phrases = engine.phrase_bigrams();
     let phrases_cs = engine.phrase_bigrams_cs();
 
@@ -45,7 +46,7 @@ pub fn check_file(path: &Path, format: Format, engine: &Engine) -> Result<Vec<Mi
         // Phrase matching: a token that forms a known bigram with its neighbour
         // (e.g. "se" in "per se") is accepted, so fragment words are only let
         // through in their phrase context and still flagged elsewhere.
-        if phrase_covered(i, tokens, lowercase, phrases, phrases_cs) {
+        if phrase_covered(i, tokens, lowercase, gap_clean, phrases, phrases_cs) {
             continue;
         }
         if tok.word.contains('-') {
@@ -87,24 +88,29 @@ pub fn check_file(path: &Path, format: Format, engine: &Engine) -> Result<Vec<Mi
 }
 
 /// True if `tokens[i]` forms a known phrase bigram with either neighbour.
-/// Regular phrases match case-insensitively (via the parallel `lowercase`
-/// array); exact-case phrases (`=Tzeya Gan`) require the neighbouring words
-/// to match as written.
+/// A bigram only counts when the source gap between the two words is clean
+/// (whitespace-only, at most one newline) — so "per. Se" or "per\n\nse"
+/// never match "per se", while a soft line wrap still does. Regular phrases
+/// match case-insensitively (via the parallel `lowercase` array); exact-case
+/// phrases (`=Tzeya Gan`) require the neighbouring words to match as written.
 pub(crate) fn phrase_covered(
     i: usize,
     tokens: &[Token],
     lowercase: &[String],
+    gap_clean: &[bool],
     phrases: &PhraseBigrams,
     phrases_cs: &PhraseBigrams,
 ) -> bool {
     let w = &lowercase[i];
     if i > 0
+        && gap_clean[i]
         && (phrases.contains(&lowercase[i - 1], w)
             || phrases_cs.contains(&tokens[i - 1].word, &tokens[i].word))
     {
         return true;
     }
     if i + 1 < tokens.len()
+        && gap_clean[i + 1]
         && (phrases.contains(w, &lowercase[i + 1])
             || phrases_cs.contains(&tokens[i].word, &tokens[i + 1].word))
     {
@@ -292,5 +298,54 @@ mod tests {
         wd.add_entry("tzeya gan", false);
         let m = check_str_with("The tzeya gan rose. The TZeya GAN fell.", wd);
         assert!(m.is_empty(), "ci phrase should accept any casing: {m:?}");
+    }
+
+    /// A phrase must not match when its words straddle a sentence boundary:
+    /// "tzeya." ending one sentence and "Gan" opening the next is not the
+    /// phrase "tzeya gan".
+    #[test]
+    fn phrases_do_not_match_across_sentence_boundary() {
+        let mut wd = crate::dict::WorkingDict::default();
+        wd.add_entry("tzeya gan", false);
+        let m = check_str_with("The tzeya. Gan rose.", wd);
+        assert_eq!(
+            m,
+            vec!["tzeya".to_string(), "Gan".to_string()],
+            "sentence-straddled bigram matched: {m:?}"
+        );
+    }
+
+    /// Ditto for a paragraph break between the two words.
+    #[test]
+    fn phrases_do_not_match_across_paragraph_break() {
+        let mut wd = crate::dict::WorkingDict::default();
+        wd.add_entry("tzeya gan", false);
+        let m = check_str_with("The tzeya\n\nGan rose.", wd);
+        assert_eq!(
+            m,
+            vec!["tzeya".to_string(), "Gan".to_string()],
+            "paragraph-straddled bigram matched: {m:?}"
+        );
+    }
+
+    /// A soft line wrap within a paragraph is still one phrase — hard-wrapped
+    /// manuscripts must not lose coverage.
+    #[test]
+    fn phrases_match_across_soft_line_wrap() {
+        let mut wd = crate::dict::WorkingDict::default();
+        wd.add_entry("tzeya gan", false);
+        let m = check_str_with("The tzeya\nGan rose.", wd);
+        assert!(m.is_empty(), "soft-wrapped phrase should match: {m:?}");
+    }
+
+    /// The bundled Latin list obeys the same rule: "de. Facto…" is not
+    /// "de facto" (both fragments are flagged standalone).
+    #[test]
+    fn latin_phrase_not_matched_across_sentence_boundary() {
+        let m = check_str("It was de. Facto rules applied.");
+        assert!(
+            m.contains(&"de".to_string()) && m.contains(&"Facto".to_string()),
+            "sentence-straddled 'de facto' not flagged: {m:?}"
+        );
     }
 }

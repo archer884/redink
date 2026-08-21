@@ -10,7 +10,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 
-use anyhow::Result;use crossterm::{
+use anyhow::Result;
+use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers,
@@ -241,8 +242,9 @@ impl App {
             KeyCode::Char('q') => match self.save_all() {
                 Ok(_) => self.quit = true,
                 Err(e) => {
-                    self.message =
-                        Some(format!("save failed (not quitting) — {e:#}; q retry, Q discard"));
+                    self.message = Some(format!(
+                        "save failed (not quitting) — {e:#}; q retry, Q discard"
+                    ));
                 }
             },
             KeyCode::Char('Q') => {
@@ -533,7 +535,8 @@ impl App {
                 .map(|buf| file_tokens(&buf.text, &entry.path));
             cache.insert(entry.path.clone(), toks);
         }
-        let Some(t) = cache.get(&entry.path).and_then(|t| t.as_ref()) else {            return false;
+        let Some(t) = cache.get(&entry.path).and_then(|t| t.as_ref()) else {
+            return false;
         };
         // The entry offset may point inside a compound token (it is a part
         // start), and offsets shift after replacements — find the token whose
@@ -548,6 +551,7 @@ impl App {
             i,
             &t.tokens,
             &t.lowercase,
+            &t.gap_clean,
             self.engine.phrase_bigrams(),
             self.engine.phrase_bigrams_cs(),
         )

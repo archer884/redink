@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use spellbook::Dictionary;
 
-use crate::dict::{canonical, strip_possessive, PhraseBigrams, WorkingDict};
+use crate::dict::{PhraseBigrams, WorkingDict, canonical, strip_possessive};
 
 /// Minimum character length for a suggestion to be shown. Shorter ones are
 /// almost always noise (e.g. "e", "s", "es").
