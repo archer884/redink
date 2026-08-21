@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use spellbook::Dictionary;
 
-use crate::dict::{canonical, strip_possessive, WorkingDict};
+use crate::dict::{WorkingDict, canonical, strip_possessive};
 
 /// Minimum character length for a suggestion to be shown. Shorter ones are
 /// almost always noise (e.g. "e", "s", "es").
@@ -26,14 +26,22 @@ pub struct Engine {
     working_ci: HashSet<String>,
     working_cs: HashSet<String>,
     working_phrases: HashSet<String>,
+    working_phrases_cs: HashSet<String>,
     session_ignore: HashSet<String>,
     phrase_bigrams: HashSet<String>,
+    phrase_bigrams_cs: HashSet<String>,
 }
 
 impl Engine {
     pub fn new(dict: Dictionary, working: WorkingDict, working_path: PathBuf) -> Self {
         let phrase_bigrams = crate::dict::build_phrase_bigrams(&working.phrases);
         let custom_dict = build_custom_dict(&working.ci, &working.cs);
+        let mut phrase_bigrams_cs = HashSet::new();
+        for p in &working.phrases_cs {
+            for bg in crate::dict::phrase_bigrams(p) {
+                phrase_bigrams_cs.insert(bg);
+            }
+        }
         Self {
             dict,
             custom_dict,
@@ -41,8 +49,10 @@ impl Engine {
             working_ci: working.ci,
             working_cs: working.cs,
             working_phrases: working.phrases,
+            working_phrases_cs: working.phrases_cs,
             session_ignore: HashSet::new(),
             phrase_bigrams,
+            phrase_bigrams_cs,
         }
     }
 
@@ -204,12 +214,19 @@ impl Engine {
         &self.phrase_bigrams
     }
 
+    /// Exact-casing phrase bigrams from the working dictionary: a token is
+    /// covered only when the neighbouring words match the phrase as written.
+    pub fn phrase_bigrams_cs(&self) -> &HashSet<String> {
+        &self.phrase_bigrams_cs
+    }
+
     /// Write the working dictionary back to disk.
     pub fn save_working(&self) -> anyhow::Result<()> {
         let dict = WorkingDict {
             ci: self.working_ci.clone(),
             cs: self.working_cs.clone(),
             phrases: self.working_phrases.clone(),
+            phrases_cs: self.working_phrases_cs.clone(),
         };
         crate::dict::save(&self.working_path, &dict)
     }

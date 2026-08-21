@@ -25,9 +25,11 @@ The working dictionary format:
 # bare word      -> case-insensitive (accepted in any case)
 # =Word          -> case-sensitive   (accepted only in that exact casing)
 # multi-word line -> phrase          (matched as bigrams against neighbours)
+# =Multi Word    -> phrase, exact casing only
 hobbit
 =Gondor
 per se
+=Tzeya Gan
 ```
 
 ## Build
@@ -49,6 +51,7 @@ redink dict list              # show the working dictionary
 redink dict add hobbit Gondor # add case-insensitive words
 redink dict add --sensitive Gondor   # add exact-case entry
 redink dict add "per se"      # add a phrase (multi-word argument)
+redink dict add --sensitive "Tzeya Gan"  # add an exact-case phrase
 redink dict remove hobbit
 redink fix ch01.md --at 1234 --word brwon --to brown   # replace at a byte offset
 ```
@@ -111,8 +114,9 @@ highlighted, with numbered suggestions.
   `dict add Tzeya-Gan` to accept it as a unit. `--` em-dashes split cleanly.
 - **Phrases.** `per se`, `de facto`, `a priori`, `in vitro`, `ad hoc`, … are
   recognized as units (43 common Latin phrases bundled; add your own as
-  multi-word lines). The fragment words are accepted *only* in the phrase, so a
-  standalone `se` is still flagged.
+  multi-word lines, or `=Multi Word` / `--sensitive` for exact casing). The
+  fragment words are accepted *only* in the phrase, so a standalone `se` is
+  still flagged.
 - **Markdown.** Fenced/inline code, bare URLs, YAML frontmatter, and HTML
   comments/tags are skipped. Override per-file with `--format`.
 - **Suggestions** shorter than 3 characters are dropped as noise.

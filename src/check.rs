@@ -41,13 +41,14 @@ pub fn check_file(
     let skip = format::skip_ranges(&src, format.resolve(path));
     let tokens = tokenize(&src, &skip);
     let phrases = engine.phrase_bigrams();
+    let phrases_cs = engine.phrase_bigrams_cs();
 
     let mut out = Vec::new();
     for (i, tok) in tokens.iter().enumerate() {
         // Phrase matching: a token that forms a known bigram with its neighbour
         // (e.g. "se" in "per se") is accepted, so fragment words are only let
         // through in their phrase context and still flagged elsewhere.
-        if phrase_covered(i, &tokens, phrases) {
+        if phrase_covered(i, &tokens, phrases, phrases_cs) {
             continue;
         }
         if tok.word.contains('-') {
@@ -97,7 +98,14 @@ pub fn check_file(
 }
 
 /// True if `tokens[i]` forms a known phrase bigram with either neighbour.
-fn phrase_covered(i: usize, tokens: &[Token], phrases: &HashSet<String>) -> bool {
+/// Regular phrases match case-insensitively; exact-case phrases (`=Tzeya
+/// Gan`) require the neighbouring words to match as written.
+fn phrase_covered(
+    i: usize,
+    tokens: &[Token],
+    phrases: &HashSet<String>,
+    phrases_cs: &HashSet<String>,
+) -> bool {
     let w = tokens[i].word.to_lowercase();
     if i > 0 {
         let p = tokens[i - 1].word.to_lowercase();
@@ -110,6 +118,14 @@ fn phrase_covered(i: usize, tokens: &[Token], phrases: &HashSet<String>) -> bool
         if phrases.contains(&format!("{w} {n}")) {
             return true;
         }
+    }
+    if i > 0 && phrases_cs.contains(&format!("{} {}", tokens[i - 1].word, tokens[i].word)) {
+        return true;
+    }
+    if i + 1 < tokens.len()
+        && phrases_cs.contains(&format!("{} {}", tokens[i].word, tokens[i + 1].word))
+    {
+        return true;
     }
     false
 }
@@ -247,6 +263,23 @@ mod tests {
         miss.into_iter().map(|m| m.word).collect()
     }
 
+    fn check_str_with(src: &str, working: crate::dict::WorkingDict) -> Vec<String> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("redink-checkcs-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.md");
+        std::fs::write(&path, src).unwrap();
+
+        let sys = crate::sysdict::resolve_embedded();
+        let dict = crate::engine::load_dictionary(&sys.aff, &sys.dic).unwrap();
+        let engine =
+            crate::engine::Engine::new(dict, working, std::path::PathBuf::from("/dev/null"));
+        let mut cache = HashMap::new();
+        let miss = check_file(&path, Format::Auto, &engine, &mut cache, 9, true).unwrap();
+        miss.into_iter().map(|m| m.word).collect()
+    }
+
     #[test]
     fn phrase_matching() {
         // "se" is accepted inside "per se" but flagged on its own.
@@ -285,5 +318,37 @@ mod tests {
         for bad in ["facto", "vitro", "ipso", "bona", "fide"] {
             assert!(!m.contains(&bad.to_string()), "{bad} flagged: {m:?}");
         }
+    }
+
+    /// An exact-case phrase accepts its fragment words only when the
+    /// neighbouring text matches the phrase as written.
+    #[test]
+    fn case_sensitive_phrase_exact_match_only() {
+        let mut wd = crate::dict::WorkingDict::default();
+        wd.add_entry("Tzeya Gan", true);
+        let m = check_str_with("The Tzeya Gan rose. The tzeya gan fell.", wd);
+        assert!(
+            !m.contains(&"Tzeya".to_string()),
+            "exact phrase flagged: {m:?}"
+        );
+        assert!(
+            !m.contains(&"Gan".to_string()),
+            "exact phrase flagged: {m:?}"
+        );
+        assert_eq!(
+            m,
+            vec!["tzeya".to_string(), "gan".to_string()],
+            "wrong-case phrase must still be flagged: {m:?}"
+        );
+    }
+
+    /// A case-insensitive phrase still accepts any casing (the cs layer must
+    /// not narrow existing behaviour).
+    #[test]
+    fn case_insensitive_phrase_still_fuzzy() {
+        let mut wd = crate::dict::WorkingDict::default();
+        wd.add_entry("tzeya gan", false);
+        let m = check_str_with("The tzeya gan rose. The TZeya GAN fell.", wd);
+        assert!(m.is_empty(), "ci phrase should accept any casing: {m:?}");
     }
 }

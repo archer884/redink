@@ -53,6 +53,7 @@ Speculative fiction is full of proper nouns and invented terms. **Do not
 redink dict add hobbit              # case-insensitive: any casing accepted
 redink dict add --sensitive Gondor  # exact case only ("Gondor", not "gondor")
 redink dict add "per se"            # a multi-word argument becomes a phrase
+redink dict add --sensitive "Tzeya Gan"  # multi-word + --sensitive = exact-case phrase
 ```
 
 …or edit `.redink.dic` directly (it is plain text, sorted, git-friendly):
@@ -61,6 +62,7 @@ redink dict add "per se"            # a multi-word argument becomes a phrase
 hobbit        # case-insensitive
 =Gondor       # exact case
 per se        # phrase (matched against neighbouring words)
+=Tzeya Gan    # phrase, exact casing only
 ```
 
 You only ever edit the **working** dictionary. The system dictionary (vendored
@@ -76,7 +78,7 @@ SCOWL) is read-only — never modify `assets/dict/`.
   `redink dict add Tzeya-Gan` (clears both `Tzeya` and `Gan`).
 - **Phrases.** `per se`, `de facto`, etc. are recognized in context — fragment
   words like `se` are accepted only inside the phrase. Add recurring foreign
-  phrases as multi-word lines.
+  phrases as multi-word lines (`=Multi Word` for exact casing only).
 - **All-caps alphanumeric tokens are skipped.** Acronyms, model numbers, and
   Roman numerals (`NASA`, `M16`, `XVII`, including possessives like `NASA's`)
   are never flagged — don't add them to the working dict.

@@ -7,9 +7,13 @@
 //! # redink working dictionary
 //! # bare word      -> case-insensitive (accepted in any case; stored lowercase)
 //! # =Word          -> case-sensitive   (accepted only in that exact casing)
+//! # multi-word line -> phrase (bigram-matched, case-insensitive)
+//! # =Multi Word     -> phrase, exact casing only
 //! hobbit
 //! elflord
 //! =Gondor
+//! per se
+//! =Tzeya Gan
 //! ```
 //! Lines starting with `#` are comments; blank lines are ignored.
 
@@ -19,7 +23,7 @@ use std::path::{Path, PathBuf};
 const DEFAULT_NAME: &str = ".redink.dic";
 const HEADER: &[&str] = &[
     "# redink working dictionary",
-    "# bare word: case-insensitive  |  =Word: case-sensitive  |  multi-word line: phrase",
+    "# bare word: case-insensitive  |  =Word: case-sensitive  |  multi-word line: phrase (= prefix: exact case)",
 ];
 
 /// Common Latin phrases used in English prose. A token is accepted when it
@@ -80,6 +84,8 @@ pub struct WorkingDict {
     pub cs: HashSet<String>,
     /// Multi-word phrases (lowercased), matched as bigrams against neighbours.
     pub phrases: HashSet<String>,
+    /// Exact-casing phrases, matched as bigrams against neighbours as written.
+    pub phrases_cs: HashSet<String>,
 }
 
 /// Decompose a phrase into its adjacent bigrams, lowercased and
@@ -149,14 +155,20 @@ pub enum AddOutcome {
 
 impl WorkingDict {
     /// Add a word (or phrase) on the appropriate layer, returning whether it
-    /// was newly inserted, already present, or ignored. Consolidates the
-    /// phrase-detection logic so the CLI add path can report accurately rather
-    /// than always crediting every requested word.
+    /// was newly inserted, already present (same layer), or ignored as a
+    /// malformed phrase (a multi-word entry that collapses to fewer than two
+    /// tokens). Multi-word entries go to `phrases` (lowercased) or, with
+    /// `sensitive`, to `phrases_cs` (exact casing).
     pub fn add_entry(&mut self, word: &str, sensitive: bool) -> AddOutcome {
         if word.chars().any(char::is_whitespace) {
             let norm: String = word.split_whitespace().collect::<Vec<_>>().join(" ");
             if norm.split(' ').count() >= 2 {
-                if self.phrases.insert(norm.to_lowercase()) {
+                let added = if sensitive {
+                    self.phrases_cs.insert(norm)
+                } else {
+                    self.phrases.insert(norm.to_lowercase())
+                };
+                if added {
                     AddOutcome::Added
                 } else {
                     AddOutcome::Duplicate
@@ -185,19 +197,33 @@ impl WorkingDict {
         self.cs.insert(canonical(word))
     }
 
+    /// Remove an entry (matches either case layer, words or phrases;
+    /// possessive-insensitive).
     pub fn remove(&mut self, word: &str) -> bool {
         let c = canonical(word);
-        self.ci.remove(&c.to_lowercase()) || self.cs.remove(&c)
+        if self.ci.remove(&c.to_lowercase()) || self.cs.remove(&c) {
+            return true;
+        }
+        if c.chars().any(char::is_whitespace) {
+            let norm: String = c.split_whitespace().collect::<Vec<_>>().join(" ");
+            if norm.split(' ').count() >= 2 {
+                return self.phrases_cs.remove(&norm) || self.phrases.remove(&norm.to_lowercase());
+            }
+        }
+        false
     }
 
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
-        self.ci.is_empty() && self.cs.is_empty() && self.phrases.is_empty()
+        self.ci.is_empty()
+            && self.cs.is_empty()
+            && self.phrases.is_empty()
+            && self.phrases_cs.is_empty()
     }
 
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
-        self.ci.len() + self.cs.len() + self.phrases.len()
+        self.ci.len() + self.cs.len() + self.phrases.len() + self.phrases_cs.len()
     }
 }
 
@@ -238,20 +264,30 @@ pub fn load(path: &Path) -> anyhow::Result<WorkingDict> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // A line containing whitespace is a phrase (matched as bigrams).
-        if line.chars().any(char::is_whitespace) {
-            let norm: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        // A `=` prefix marks case-sensitive; a line containing whitespace is
+        // a phrase (matched as bigrams), so `=Tzeya Gan` is an exact-casing
+        // phrase.
+        let (body, sensitive) = match line.strip_prefix('=') {
+            Some(rest) => (rest, true),
+            None => (line, false),
+        };
+        if body.chars().any(char::is_whitespace) {
+            let norm: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
             if norm.split(' ').count() >= 2 {
-                dict.phrases.insert(norm.to_lowercase());
+                if sensitive {
+                    dict.phrases_cs.insert(norm);
+                } else {
+                    dict.phrases.insert(norm.to_lowercase());
+                }
             }
             continue;
         }
-        if let Some(rest) = line.strip_prefix('=') {
-            if !rest.is_empty() {
-                dict.add_cs(rest);
+        if sensitive {
+            if !body.is_empty() {
+                dict.add_cs(body);
             }
         } else {
-            dict.add_ci(line);
+            dict.add_ci(body);
         }
     }
     Ok(dict)
@@ -269,6 +305,8 @@ pub fn save(path: &Path, dict: &WorkingDict) -> anyhow::Result<()> {
     cs.sort();
     let mut ph: Vec<&String> = dict.phrases.iter().collect();
     ph.sort();
+    let mut phcs: Vec<&String> = dict.phrases_cs.iter().collect();
+    phcs.sort();
 
     let mut out = String::new();
     for h in HEADER {
@@ -284,9 +322,14 @@ pub fn save(path: &Path, dict: &WorkingDict) -> anyhow::Result<()> {
         out.push_str(w);
         out.push('\n');
     }
-    if !ph.is_empty() {
+    if !ph.is_empty() || !phcs.is_empty() {
         out.push_str("# phrases:\n");
         for w in &ph {
+            out.push_str(w);
+            out.push('\n');
+        }
+        for w in &phcs {
+            out.push('=');
             out.push_str(w);
             out.push('\n');
         }
@@ -380,6 +423,14 @@ mod tests {
         assert_eq!(d.add_entry("quid pro quo", false), AddOutcome::Duplicate);
         // a multi-word argument that collapses to <2 tokens is ignored.
         assert_eq!(d.add_entry("   ", false), AddOutcome::Ignored);
+
+        // exact-case phrases live on their own layer.
+        assert_eq!(d.add_entry("Tzeya Gan", true), AddOutcome::Added);
+        assert_eq!(d.add_entry("Tzeya Gan", true), AddOutcome::Duplicate);
+        assert!(d.phrases_cs.contains("Tzeya Gan"));
+        assert!(!d.phrases.contains("tzeya gan"));
+        // the same words on the case-insensitive layer are a separate entry.
+        assert_eq!(d.add_entry("tzeya gan", false), AddOutcome::Added);
     }
 
     #[test]
@@ -396,10 +447,43 @@ mod tests {
         let mut d = WorkingDict::default();
         d.phrases.insert("per se".to_string());
         d.phrases.insert("quid pro quo".to_string());
+        d.phrases_cs.insert("Tzeya Gan".to_string());
         save(&p, &d).unwrap();
         let loaded = load(&p).unwrap();
         assert!(loaded.phrases.contains("per se"));
         assert!(loaded.phrases.contains("quid pro quo"));
+        assert!(loaded.phrases_cs.contains("Tzeya Gan"));
+        assert!(
+            !loaded.phrases.contains("=tzeya gan"),
+            "= must not be baked into the phrase"
+        );
+    }
+
+    /// A hand-written `=Tzeya Gan` line parses as an exact-case phrase, not a
+    /// literal "=..." word (regression: the prefix used to be baked in).
+    #[test]
+    fn phrase_cs_prefix_parses() {
+        let p = scratch("cs-phrase.dic");
+        std::fs::write(&p, "hobbit\n=Gondor\nper se\n=Tzeya Gan\n").unwrap();
+        let d = load(&p).unwrap();
+        assert!(d.ci.contains("hobbit"));
+        assert!(d.cs.contains("Gondor"));
+        assert!(d.phrases.contains("per se"));
+        assert!(d.phrases_cs.contains("Tzeya Gan"));
+    }
+
+    #[test]
+    fn remove_phrase() {
+        let mut d = WorkingDict::default();
+        d.add_entry("Tzeya Gan", true);
+        assert!(d.remove("Tzeya Gan"));
+        assert!(d.phrases_cs.is_empty());
+        d.add_entry("quid pro quo", false);
+        // remove matches either phrase layer, case-insensitively for ci.
+        assert!(d.remove("Quid Pro Quo"));
+        assert!(d.phrases.is_empty());
+        // an unknown phrase removes nothing.
+        assert!(!d.remove("per se"));
     }
 
     #[test]

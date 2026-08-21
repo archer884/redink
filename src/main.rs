@@ -9,9 +9,9 @@ mod check;
 mod cli;
 // Shared with `build.rs` (via `#[path]`); test-only here — `cargo test`
 // doesn't run build-script tests, so the patcher's unit tests live here.
+mod dict;
 #[cfg(test)]
 mod dictpatch;
-mod dict;
 mod engine;
 mod format;
 mod report;
@@ -232,16 +232,21 @@ fn run_dict(opts: &cli::GlobalOpts, action: DictAction) -> Result<()> {
             cs.sort();
             let mut ph: Vec<&String> = d.phrases.iter().collect();
             ph.sort();
+            let mut phcs: Vec<&String> = d.phrases_cs.iter().collect();
+            phcs.sort();
             for w in ci {
                 let _ = writeln!(out, "{w}");
             }
             for w in cs {
                 let _ = writeln!(out, "={w}");
             }
-            if !ph.is_empty() {
+            if !ph.is_empty() || !phcs.is_empty() {
                 let _ = writeln!(out, "# phrases:");
                 for w in ph {
                     let _ = writeln!(out, "{w}");
+                }
+                for w in phcs {
+                    let _ = writeln!(out, "={w}");
                 }
             }
         }

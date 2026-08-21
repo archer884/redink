@@ -93,12 +93,13 @@ pub enum Command {
 pub enum DictAction {
     /// List the words in the working dictionary.
     List,
-    /// Add words. Case-insensitive by default; use --sensitive for exact case.
+    /// Add words or phrases. Case-insensitive by default; use --sensitive for
+    /// exact case (a multi-word argument then becomes an exact-case phrase).
     Add {
         words: Vec<String>,
         #[arg(short = 's', long)]
         sensitive: bool,
     },
-    /// Remove words (matches either case layer).
+    /// Remove words or phrases (matches either case layer).
     Remove { words: Vec<String> },
 }
